@@ -247,7 +247,10 @@
         <span class="label">Archetype</span>
         <h1 class="page-title">{analytics.archetype_label}</h1>
       </div>
-      <a href="/analytics" class="btn-ghost">← Analytics</a>
+      <div class="header-actions">
+        <a href="/analytics" class="btn-ghost">← Analytics</a>
+        <a href="/analytics/archetypes/{data.label}/evolution" class="btn-evolution">Évolution ↗</a>
+      </div>
     </header>
 
     <!-- Stats pills -->
@@ -448,6 +451,8 @@
     padding-top: 2rem;
     padding-bottom: 5rem;
   }
+
+  .header-actions { display: flex; align-items: center; gap: 0.75rem; }
 
   /* Breadcrumb */
   .breadcrumb { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 2rem; font-size: 0.8125rem; }
