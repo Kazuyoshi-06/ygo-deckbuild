@@ -1,0 +1,67 @@
+name: Backend CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "backend/**"
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} / PostgreSQL ${{ matrix.postgres-version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+        postgres-version: ["17"]
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ygo_deckbuild_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        working-directory: backend
+        run: pytest tests/ --ignore=tests/integration -v
+
+      - name: Run integration tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ygo_deckbuild_test
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ygo_deckbuild
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          AUTH_ENABLED: "true"
+          STORAGE_LOCAL_PATH: /tmp/ygo_media
+          VERIFY_SSL: "false"
+        run: pytest tests/integration/ -v
