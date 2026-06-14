@@ -10,6 +10,7 @@ from app.api.v1.decks import router as decks_router
 from app.api.v1.probability import router as probability_router
 from app.api.v1.ratio_advice import router as ratio_advice_router
 from app.api.v1.search import router as search_router
+from app.api.v1.simulation import router as simulation_router
 
 router = APIRouter()
 
@@ -22,6 +23,7 @@ router.include_router(compare_router, prefix="/compare")
 router.include_router(decks_router, prefix="/decks")
 router.include_router(probability_router, prefix="/decks")
 router.include_router(ratio_advice_router, prefix="/decks")
+router.include_router(simulation_router, prefix="/decks")
 router.include_router(search_router, prefix="/search")
 
 

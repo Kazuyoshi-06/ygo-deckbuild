@@ -333,6 +333,7 @@
         <a href="/decks/{deck.id}/analytics" class="btn-analytics">Analytics ↗</a>
         <a href="/decks/{deck.id}/probability" class="btn-analytics btn-probability">Probabilité ↗</a>
         <a href="/decks/{deck.id}/ratio-advice" class="btn-analytics btn-ratios">Ratios ↗</a>
+        <a href="/decks/{deck.id}/simulate" class="btn-analytics btn-simulate">Simulateur ↗</a>
 
         <div class="format-toggle" role="group" aria-label="Select format">
           {#each (['TCG', 'OCG'] as const) as fmt}
@@ -931,6 +932,14 @@
   }
   .btn-ratios:hover {
     border-color: #818cf8;
+  }
+
+  .btn-simulate {
+    border-color: rgba(251, 191, 36, 0.3);
+    color: #fbbf24;
+  }
+  .btn-simulate:hover {
+    border-color: #fbbf24;
   }
 
   .deck-date {
