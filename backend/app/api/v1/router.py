@@ -11,6 +11,8 @@ from app.api.v1.probability import router as probability_router
 from app.api.v1.ratio_advice import router as ratio_advice_router
 from app.api.v1.search import router as search_router
 from app.api.v1.score import router as score_router
+from app.api.v1.matchup import analytics_router as matchup_analytics_router
+from app.api.v1.matchup import router as matchup_router
 from app.api.v1.side_optimizer import router as side_optimizer_router
 from app.api.v1.simulation import router as simulation_router
 
@@ -19,6 +21,7 @@ router = APIRouter()
 router.include_router(auth_router)
 router.include_router(admin_router)
 router.include_router(analytics_router, prefix="/analytics")
+router.include_router(matchup_analytics_router, prefix="/analytics")
 router.include_router(banlists_router, prefix="/banlists")
 router.include_router(cards_router, prefix="/cards")
 router.include_router(compare_router, prefix="/compare")
@@ -26,6 +29,7 @@ router.include_router(decks_router, prefix="/decks")
 router.include_router(probability_router, prefix="/decks")
 router.include_router(ratio_advice_router, prefix="/decks")
 router.include_router(score_router, prefix="/decks")
+router.include_router(matchup_router, prefix="/decks")
 router.include_router(side_optimizer_router, prefix="/decks")
 router.include_router(simulation_router, prefix="/decks")
 router.include_router(search_router, prefix="/search")

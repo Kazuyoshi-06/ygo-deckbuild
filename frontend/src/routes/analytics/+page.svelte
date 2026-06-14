@@ -88,6 +88,16 @@
       </section>
     {/if}
 
+    <!-- Matchup matrix -->
+    <section class="section">
+      <h2 class="section-title">Matchup Matrix</h2>
+      <p class="hint-text">
+        Win rates entre archétypes, basés sur les résultats de matches reportés.
+        Enregistrez vos résultats depuis la page d'un deck → Matchups.
+      </p>
+      <a href="/analytics/matchups" class="btn-secondary mt-sm">Voir la matrice →</a>
+    </section>
+
     <!-- Per-deck analytics prompt -->
     {#if overview.total_decks > 0}
       <section class="section">

@@ -336,6 +336,7 @@
         <a href="/decks/{deck.id}/simulate" class="btn-analytics btn-simulate">Simulateur ↗</a>
         <a href="/decks/{deck.id}/score" class="btn-analytics btn-score">Score ↗</a>
         <a href="/decks/{deck.id}/side-optimizer" class="btn-analytics btn-side">Side ↗</a>
+        <a href="/decks/{deck.id}/matchups" class="btn-analytics btn-matchups">Matchups ↗</a>
 
         <div class="format-toggle" role="group" aria-label="Select format">
           {#each (['TCG', 'OCG'] as const) as fmt}
@@ -958,6 +959,14 @@
   }
   .btn-side:hover {
     border-color: #facc15;
+  }
+
+  .btn-matchups {
+    border-color: rgba(168, 85, 247, 0.3);
+    color: #a855f7;
+  }
+  .btn-matchups:hover {
+    border-color: #a855f7;
   }
 
   .deck-date {
