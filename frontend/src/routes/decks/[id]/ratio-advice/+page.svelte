@@ -75,6 +75,27 @@
     const right = Math.min(100, (item.ref_ideal_max / scale) * 100);
     return { left, width: right - left };
   }
+
+  // Global summary
+  interface Summary { criticals: number; warnings: number; oks: number; verdict: string; color: string }
+  let summary = $derived<Summary>((() => {
+    const criticals = d.advice.filter((a: AdviceItem) => a.status === 'critical').length;
+    const warnings  = d.advice.filter((a: AdviceItem) => a.status === 'warning').length;
+    const oks       = d.advice.filter((a: AdviceItem) => a.status === 'ok').length;
+    let verdict: string;
+    let color: string;
+    if (criticals > 0) {
+      verdict = `${criticals} critical issue${criticals > 1 ? 's' : ''} detected. Fix ${criticals > 1 ? 'these' : 'this'} before taking the deck to a tournament.`;
+      color = '#ef4444';
+    } else if (warnings > 0) {
+      verdict = `${warnings} metric${warnings > 1 ? 's are' : ' is'} slightly off. Your deck is playable but has room to improve.`;
+      color = '#f59e0b';
+    } else {
+      verdict = `All ${oks} metrics are within competitive targets. Your ratios look solid.`;
+      color = '#22c55e';
+    }
+    return { criticals, warnings, oks, verdict, color };
+  })());
 </script>
 
 <svelte:head>
@@ -133,6 +154,27 @@
       <div class="ctx-divider"></div>
       <span class="no-arch-data">Aucun archétype renseigné — comparaison archétype indisponible.</span>
     {/if}
+  </div>
+
+  <!-- ── Global summary ────────────────────────────────────────── -->
+  <div class="summary-banner" style="border-left-color:{summary.color}">
+    <span class="summary-icon" style="color:{summary.color}">
+      {#if summary.criticals > 0}✕{:else if summary.warnings > 0}⚠{:else}✓{/if}
+    </span>
+    <div class="summary-body">
+      <p class="summary-verdict">{summary.verdict}</p>
+      <div class="summary-counts">
+        {#if summary.criticals > 0}
+          <span class="sc sc--critical">{summary.criticals} critical</span>
+        {/if}
+        {#if summary.warnings > 0}
+          <span class="sc sc--warning">{summary.warnings} warning{summary.warnings > 1 ? 's' : ''}</span>
+        {/if}
+        {#if summary.oks > 0}
+          <span class="sc sc--ok">{summary.oks} ok</span>
+        {/if}
+      </div>
+    </div>
   </div>
 
   <!-- ── Legend ──────────────────────────────────────────────── -->
@@ -306,6 +348,44 @@
     padding: 0.2rem 0.75rem;
     font-size: 0.8rem;
   }
+
+  /* Global summary banner */
+  .summary-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.875rem;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-left-width: 3px;
+    border-radius: 10px;
+    padding: 0.875rem 1.125rem;
+    margin-bottom: 1rem;
+  }
+  .summary-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+    margin-top: 0.1rem;
+    font-weight: 700;
+  }
+  .summary-body { display: flex; flex-direction: column; gap: 0.375rem; }
+  .summary-verdict {
+    font-size: 0.875rem;
+    color: #e2e8f0;
+    margin: 0;
+    line-height: 1.5;
+  }
+  .summary-counts { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .sc {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .sc--critical { background: #ef444418; color: #ef4444; border: 1px solid #ef444430; }
+  .sc--warning  { background: #f59e0b18; color: #f59e0b; border: 1px solid #f59e0b30; }
+  .sc--ok       { background: #22c55e18; color: #22c55e; border: 1px solid #22c55e30; }
 
   /* Context bar */
   .context-bar {

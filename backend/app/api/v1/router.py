@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.admin import router as admin_router
+from app.api.v1.tournaments import router as tournaments_router
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.banlists import router as banlists_router
@@ -15,6 +16,7 @@ from app.api.v1.matchup import analytics_router as matchup_analytics_router
 from app.api.v1.matchup import router as matchup_router
 from app.api.v1.side_optimizer import router as side_optimizer_router
 from app.api.v1.simulation import router as simulation_router
+from app.api.v1.tournament_prep import router as tournament_prep_router
 
 router = APIRouter()
 
@@ -32,7 +34,9 @@ router.include_router(score_router, prefix="/decks")
 router.include_router(matchup_router, prefix="/decks")
 router.include_router(side_optimizer_router, prefix="/decks")
 router.include_router(simulation_router, prefix="/decks")
+router.include_router(tournament_prep_router, prefix="/decks")
 router.include_router(search_router, prefix="/search")
+router.include_router(tournaments_router, prefix="/tournaments")
 
 
 @router.get("/health")

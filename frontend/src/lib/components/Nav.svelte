@@ -10,6 +10,7 @@
     { href: '/cards', label: 'Cards' },
     { href: '/analytics', label: 'Analytics' },
     { href: '/banlists', label: 'Banlists' },
+    { href: '/tournaments', label: 'Tournaments' },
   ];
 
   let menuOpen = $state(false);

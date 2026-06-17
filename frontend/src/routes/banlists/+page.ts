@@ -19,18 +19,33 @@ interface BanlistDetail {
   semi_limited: BanlistEntry[];
 }
 
+interface BanlistSummary {
+  id: number;
+  format: string;
+  effective_date: string;
+  version_label: string | null;
+  forbidden_count: number;
+  limited_count: number;
+  semi_limited_count: number;
+}
+
 interface LatestBanlists {
-  tcg: { id: number; format: string; effective_date: string; forbidden_count: number; limited_count: number; semi_limited_count: number } | null;
-  ocg: { id: number; format: string; effective_date: string; forbidden_count: number; limited_count: number; semi_limited_count: number } | null;
+  tcg: BanlistSummary | null;
+  ocg: BanlistSummary | null;
 }
 
 export const load: PageLoad = async ({ fetch }) => {
-  const latest: LatestBanlists = await fetch('/api/v1/banlists/latest').then((r) => r.json());
-
-  const [tcg, ocg] = await Promise.all([
-    latest.tcg ? fetch(`/api/v1/banlists/${latest.tcg.id}`).then((r) => r.json() as Promise<BanlistDetail>) : Promise.resolve(null),
-    latest.ocg ? fetch(`/api/v1/banlists/${latest.ocg.id}`).then((r) => r.json() as Promise<BanlistDetail>) : Promise.resolve(null),
+  const [latest, allBanlists] = await Promise.all([
+    fetch('/api/v1/banlists/latest').then((r) => r.json() as Promise<LatestBanlists>),
+    fetch('/api/v1/banlists').then((r) => r.json() as Promise<BanlistSummary[]>),
   ]);
 
-  return { tcg, ocg };
+  const [tcg, ocg, predictionTCG, predictionOCG] = await Promise.all([
+    latest.tcg ? fetch(`/api/v1/banlists/${latest.tcg.id}`).then((r) => r.json() as Promise<BanlistDetail>) : Promise.resolve(null),
+    latest.ocg ? fetch(`/api/v1/banlists/${latest.ocg.id}`).then((r) => r.json() as Promise<BanlistDetail>) : Promise.resolve(null),
+    fetch('/api/v1/banlists/prediction?format=TCG').then((r) => (r.ok ? r.json() : null)),
+    fetch('/api/v1/banlists/prediction?format=OCG').then((r) => (r.ok ? r.json() : null)),
+  ]);
+
+  return { tcg, ocg, allBanlists, predictionTCG, predictionOCG };
 };

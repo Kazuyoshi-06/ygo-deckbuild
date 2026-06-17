@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import CardPreview from '$lib/components/CardPreview.svelte';
 
   interface CardItem {
     id: number;
@@ -109,6 +110,27 @@
     await navigator.clipboard.writeText(name);
     copiedId = id;
     setTimeout(() => { copiedId = null; }, 1500);
+  }
+
+  // ── Card hover preview ────────────────────────────────────────────────────
+  let previewCardId: number | null = $state(null);
+  let previewX = $state(0);
+  let previewY = $state(0);
+  let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function showPreview(id: number, e: MouseEvent) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      previewCardId = id;
+      previewX = rect.right;
+      previewY = rect.top + rect.height / 2;
+    }, 120);
+  }
+
+  function hidePreview() {
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+    previewCardId = null;
   }
 </script>
 
@@ -221,9 +243,12 @@
     <div class="card-grid">
       {#each cards as card (card.id)}
         {@const badge = cardBadge(card.tcg_date, card.ocg_date)}
-        <div
+        <a
+          href="/cards/{card.id}"
           class="card-slot"
           title="{card.name}{card.archetype ? ` · ${card.archetype}` : ''}{badge ? ` [${badge}]` : ''}"
+          onmouseenter={(e) => showPreview(card.id, e)}
+          onmouseleave={hidePreview}
         >
           <div class="card-img-wrap">
             <img
@@ -239,14 +264,14 @@
             <button
               class="copy-btn"
               class:copy-btn--done={copiedId === card.id}
-              onclick={(e) => { e.stopPropagation(); copyCardName(card.id, card.name); }}
+              onclick={(e) => { e.preventDefault(); e.stopPropagation(); copyCardName(card.id, card.name); }}
               type="button"
               aria-label="Copy card name"
               title="Copy name"
             >{copiedId === card.id ? '✓' : '⎘'}</button>
           </div>
           <p class="card-name">{card.name}</p>
-        </div>
+        </a>
       {/each}
     </div>
 
@@ -269,6 +294,8 @@
     {/if}
   {/if}
 </div>
+
+<CardPreview cardId={previewCardId} anchorX={previewX} anchorY={previewY} />
 
 <style>
   .page-body {

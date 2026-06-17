@@ -3,12 +3,22 @@
   import '../app.css';
   import Nav from '$lib/components/Nav.svelte';
   import { navigating } from '$app/stores';
+  import { dev } from '$app/environment';
   import { auth } from '$lib/stores/auth';
 
   let { children } = $props();
 
   onMount(() => {
     auth.init();
+
+    // Skip in dev — the service worker's cache would otherwise fight with Vite's HMR.
+    if (!dev && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => {
+        // Installability/offline support is a progressive enhancement — a failed
+        // registration (unsupported browser, blocked by extension, etc.) shouldn't
+        // surface as an error to the user.
+      });
+    }
   });
 
   const navLinks = [

@@ -33,21 +33,29 @@
     brick_cards: CardBrickRate[];
   }
 
-  let { data } = $props<{ data: { deckId: number; initial: SimulationData } }>();
+  let { data } = $props<{ data: { deckId: number; initial1: SimulationData; initial2: SimulationData } }>();
 
   const deckId = untrack(() => data.deckId);
-  let result = $state<SimulationData>(untrack(() => data.initial));
+  let result1 = $state<SimulationData>(untrack(() => data.initial1)); // Going First  — 5 cards
+  let result2 = $state<SimulationData>(untrack(() => data.initial2)); // Going Second — 6 cards
   let running = $state(false);
-  let handSize = $state(5);
   let nSim = $state(10000);
+  let detailView = $state<5 | 6>(5);
 
   const SIM_OPTIONS = [1000, 5000, 10000, 25000, 50000];
+
+  // Derived: the result used for the detailed section below the comparison
+  let result = $derived(detailView === 5 ? result1 : result2);
 
   async function runSim() {
     running = true;
     try {
-      const res = await fetch(`/api/v1/decks/${deckId}/simulate?n=${nSim}&hand=${handSize}`);
-      if (res.ok) result = await res.json();
+      const [res1, res2] = await Promise.all([
+        fetch(`/api/v1/decks/${deckId}/simulate?n=${nSim}&hand=5`),
+        fetch(`/api/v1/decks/${deckId}/simulate?n=${nSim}&hand=6`),
+      ]);
+      if (res1.ok) result1 = await res1.json();
+      if (res2.ok) result2 = await res2.json();
     } finally {
       running = false;
     }
@@ -72,13 +80,8 @@
 
   function roleColor(role: string | null): string {
     const MAP: Record<string, string> = {
-      starter:   '#22c55e',
-      extender:  '#3b82f6',
-      handtrap:  '#f59e0b',
-      garnet:    '#ef4444',
-      tech:      '#8b5cf6',
-      boss:      '#ec4899',
-      other:     '#6b7280',
+      starter: '#22c55e', extender: '#3b82f6', handtrap: '#f59e0b',
+      garnet: '#ef4444', tech: '#8b5cf6', boss: '#ec4899', other: '#6b7280',
     };
     return role ? (MAP[role] ?? '#6b7280') : '#475569';
   }
@@ -92,65 +95,90 @@
     return MAP[role] ?? role;
   }
 
-  // Histogram bar max
-  const maxDist = $derived(
+  function avgLabel(avg: number): string {
+    if (avg >= 1.2) return 'Excellent';
+    if (avg >= 0.9) return 'Good';
+    if (avg >= 0.6) return 'Average';
+    return 'Low';
+  }
+
+  // Comparison delta: GS (hand=6) vs GF (hand=5)
+  interface DeltaInfo { label: string; color: string }
+  function delta(gf: number, gs: number, goodDirection: 'up' | 'down' = 'up'): DeltaInfo {
+    const d = gs - gf;
+    const sign = d > 0 ? '+' : '';
+    const label = `${sign}${(d * 100).toFixed(1)}%`;
+    const isGood = goodDirection === 'up' ? d > 0 : d < 0;
+    const color = Math.abs(d) < 0.003 ? '#64748b' : isGood ? '#22c55e' : '#ef4444';
+    return { label, color };
+  }
+
+  function avgDelta(gf: number, gs: number): DeltaInfo {
+    const d = gs - gf;
+    const sign = d > 0 ? '+' : '';
+    const label = `${sign}${d.toFixed(2)}`;
+    const color = Math.abs(d) < 0.01 ? '#64748b' : d > 0 ? '#22c55e' : '#ef4444';
+    return { label, color };
+  }
+
+  // Histogram bar max for the selected detail view
+  let maxDist = $derived(
     result.starter_dist.length > 0
-      ? Math.max(...result.starter_dist.map(d => d.pct))
+      ? Math.max(...result.starter_dist.map((d: StarterDistEntry) => d.pct))
       : 1
   );
 
-  // Top bricks: cards with highest dead_pct, limit 15
-  const topBricks = $derived(
+  // Top bricks for the selected detail view
+  let topBricks = $derived(
     [...result.brick_cards]
-      .sort((a, b) => b.dead_pct - a.dead_pct)
+      .sort((a: CardBrickRate, b: CardBrickRate) => b.dead_pct - a.dead_pct)
       .slice(0, 15)
   );
 
-  // Avg quality indicator
-  function avgLabel(avg: number): string {
-    if (avg >= 1.2) return 'Excellent';
-    if (avg >= 0.9) return 'Bon';
-    if (avg >= 0.6) return 'Moyen';
-    return 'Faible';
+  // Pre-computed deltas for the comparison table
+  let dWin     = $derived(delta(result1.win_rate,     result2.win_rate,     'up'));
+  let dMed     = $derived(delta(result1.medium_rate,  result2.medium_rate,  'up'));
+  let dDead    = $derived(delta(result1.dead_rate,    result2.dead_rate,    'down'));
+  let dStart   = $derived(avgDelta(result1.avg_starters,  result2.avg_starters));
+  let dHT      = $derived(avgDelta(result1.avg_handtraps, result2.avg_handtraps));
+
+  // Interpretation texts for the comparison
+  function winInterpretation(rate: number): string {
+    if (rate >= 0.85) return 'Excellent — well above competitive standard (70%).';
+    if (rate >= 0.75) return 'Very good — above the competitive benchmark (70%).';
+    if (rate >= 0.70) return 'Good — meets the competitive benchmark.';
+    if (rate >= 0.60) return 'Below competitive standard. Consider adding more starters.';
+    return 'Insufficient. This deck bricks frequently — review your starter ratio.';
+  }
+
+  function deadInterpretation(rate: number): string {
+    if (rate <= 0.04) return 'Excellent consistency — almost never bricks.';
+    if (rate <= 0.08) return 'Good consistency — acceptable brick rate for competitive play.';
+    if (rate <= 0.15) return 'Moderate — slightly higher than ideal.';
+    return 'High brick rate. Review garnet count and starter balance.';
   }
 </script>
 
 <svelte:head>
-  <title>Simulateur — {result.deck_title} — YGO Intel</title>
+  <title>Simulator — {result1.deck_title} — YGO Intel</title>
 </svelte:head>
 
 <div class="page">
   <div class="topbar">
     <a href="/decks/{deckId}" class="back">← Deck</a>
-    <h1>{result.deck_title}</h1>
-    <span class="badge">{result.main_count} cartes · {result.n_simulations.toLocaleString()} simulations</span>
+    <h1>{result1.deck_title}</h1>
+    <span class="badge">{result1.main_count} cards · {nSim.toLocaleString()} simulations</span>
   </div>
 
-  {#if !result.has_roles}
+  {#if !result1.has_roles}
     <div class="no-roles">
-      Les résultats sont basiques sans rôles tagués.
-      <a href="/decks/{deckId}/probability">Taguez vos cartes →</a>
+      Results are basic without tagged card roles.
+      <a href="/decks/{deckId}/probability">Tag your cards →</a>
     </div>
   {/if}
 
-  <!-- ── Controls ──────────────────────────────────────────────── -->
+  <!-- ── Controls ──────────────────────────────────────────── -->
   <div class="controls">
-    <div class="ctrl-group">
-      <span class="ctrl-label">Main</span>
-      <div class="toggle">
-        {#each [5, 6] as h}
-          <button
-            type="button"
-            class="toggle-btn"
-            class:active={handSize === h}
-            onclick={() => (handSize = h)}
-          >
-            {h} cartes {h === 5 ? '(going 1st)' : '(going 2nd)'}
-          </button>
-        {/each}
-      </div>
-    </div>
-
     <div class="ctrl-group">
       <span class="ctrl-label">Simulations</span>
       <div class="toggle">
@@ -173,26 +201,124 @@
       onclick={runSim}
       disabled={running}
     >
-      {running ? 'Simulation en cours…' : '▶ Lancer la simulation'}
+      {#if running}
+        <span class="run-spinner" aria-hidden="true"></span>
+        Running…
+      {:else}
+        ▶ Run Both Simulations
+      {/if}
     </button>
   </div>
 
-  <!-- ── Win / Medium / Dead rates ─────────────────────────────── -->
+  <!-- ── Going First vs Going Second comparison ────────────── -->
+  <section class="compare-panel">
+    <div class="compare-header">
+      <span class="compare-title">Going First vs Going Second</span>
+      <span class="compare-sub">{result1.n_simulations.toLocaleString()} simulations each</span>
+    </div>
+
+    <div class="compare-grid">
+      <!-- Column headers -->
+      <div class="compare-col-hd"></div>
+      <div class="compare-col-hd gf-hd">
+        <span class="gf-label">Going First</span>
+        <span class="hand-badge">5 cards</span>
+      </div>
+      <div class="compare-col-hd gs-hd">
+        <span class="gs-label">Going Second</span>
+        <span class="hand-badge">6 cards</span>
+      </div>
+      <div class="compare-col-hd delta-hd">
+        <span>Δ GS − GF</span>
+      </div>
+
+      <!-- Win rate -->
+      <div class="compare-row-label">Win rate <span class="row-hint">≥1 starter</span></div>
+      <div class="compare-val" style="color:{winColor(result1.win_rate)}">{pct(result1.win_rate)}</div>
+      <div class="compare-val" style="color:{winColor(result2.win_rate)}">{pct(result2.win_rate)}</div>
+      <div class="compare-delta" style="color:{dWin.color}">{dWin.label}</div>
+
+      <!-- Medium rate -->
+      <div class="compare-row-label">Medium hand <span class="row-hint">0 starter + ≥1 HT</span></div>
+      <div class="compare-val" style="color:#f59e0b">{pct(result1.medium_rate)}</div>
+      <div class="compare-val" style="color:#f59e0b">{pct(result2.medium_rate)}</div>
+      <div class="compare-delta" style="color:{dMed.color}">{dMed.label}</div>
+
+      <!-- Dead rate -->
+      <div class="compare-row-label">Brick rate <span class="row-hint">0 starter · 0 HT</span></div>
+      <div class="compare-val" style="color:{deadColor(result1.dead_rate)}">{pct(result1.dead_rate)}</div>
+      <div class="compare-val" style="color:{deadColor(result2.dead_rate)}">{pct(result2.dead_rate)}</div>
+      <div class="compare-delta" style="color:{dDead.color}">{dDead.label}</div>
+
+      <!-- Avg starters -->
+      <div class="compare-row-label">Avg starters</div>
+      <div class="compare-val muted">{result1.avg_starters.toFixed(2)}</div>
+      <div class="compare-val muted">{result2.avg_starters.toFixed(2)}</div>
+      <div class="compare-delta" style="color:{dStart.color}">{dStart.label}</div>
+
+      <!-- Avg handtraps -->
+      <div class="compare-row-label">Avg handtraps</div>
+      <div class="compare-val muted">{result1.avg_handtraps.toFixed(2)}</div>
+      <div class="compare-val muted">{result2.avg_handtraps.toFixed(2)}</div>
+      <div class="compare-delta" style="color:{dHT.color}">{dHT.label}</div>
+    </div>
+
+    <!-- Interpretation of Going First win rate -->
+    <div class="interpret-row">
+      <div class="interpret-item">
+        <span class="interpret-tag">GF</span>
+        <span class="interpret-text">{winInterpretation(result1.win_rate)}</span>
+      </div>
+      <div class="interpret-sep"></div>
+      <div class="interpret-item">
+        <span class="interpret-tag">GS</span>
+        <span class="interpret-text">{winInterpretation(result2.win_rate)}</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Detailed analysis toggle ──────────────────────────── -->
+  <div class="detail-switcher">
+    <span class="detail-label">Detailed analysis</span>
+    <div class="view-toggle">
+      <button
+        type="button"
+        class="view-btn"
+        class:view-btn--active={detailView === 5}
+        onclick={() => (detailView = 5)}
+      >
+        Going First
+        <span class="hand-tag">5 cards</span>
+      </button>
+      <button
+        type="button"
+        class="view-btn"
+        class:view-btn--active={detailView === 6}
+        onclick={() => (detailView = 6)}
+      >
+        Going Second
+        <span class="hand-tag">6 cards</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Win / Medium / Dead rates ─────────────────────────── -->
   <section class="rates-grid">
     <div class="rate-card win">
       <div class="rate-icon">▲</div>
       <div class="rate-val" style="color:{winColor(result.win_rate)}">{pct(result.win_rate)}</div>
-      <div class="rate-label">Mains gagnantes</div>
-      <div class="rate-sub">≥1 starter en main</div>
+      <div class="rate-label">Winning hands</div>
+      <div class="rate-sub">≥1 starter drawn</div>
       <div class="rate-bar-track">
         <div class="rate-bar" style="width:{result.win_rate*100}%;background:{winColor(result.win_rate)}"></div>
       </div>
+      <div class="rate-interp">{winInterpretation(result.win_rate)}</div>
     </div>
 
     <div class="rate-card medium">
       <div class="rate-icon">◆</div>
       <div class="rate-val" style="color:#f59e0b">{pct(result.medium_rate)}</div>
-      <div class="rate-label">Mains passables</div>
+      <div class="rate-label">Playable hands</div>
       <div class="rate-sub">0 starter · ≥1 handtrap</div>
       <div class="rate-bar-track">
         <div class="rate-bar" style="width:{result.medium_rate*100}%;background:#f59e0b"></div>
@@ -202,41 +328,42 @@
     <div class="rate-card dead">
       <div class="rate-icon">▼</div>
       <div class="rate-val" style="color:{deadColor(result.dead_rate)}">{pct(result.dead_rate)}</div>
-      <div class="rate-label">Mains mortes</div>
+      <div class="rate-label">Brick hands</div>
       <div class="rate-sub">0 starter · 0 handtrap</div>
       <div class="rate-bar-track">
         <div class="rate-bar" style="width:{result.dead_rate*100}%;background:{deadColor(result.dead_rate)}"></div>
       </div>
+      <div class="rate-interp">{deadInterpretation(result.dead_rate)}</div>
     </div>
   </section>
 
-  <!-- ── Averages ───────────────────────────────────────────────── -->
+  <!-- ── Averages ───────────────────────────────────────────── -->
   <section class="avgs-row">
     <div class="avg-item">
       <span class="avg-val" style="color:#22c55e">{result.avg_starters.toFixed(2)}</span>
-      <span class="avg-label">starters / main</span>
+      <span class="avg-label">starters / hand</span>
       <span class="avg-qual" style="color:{result.avg_starters >= 0.9 ? '#22c55e' : '#f59e0b'}">{avgLabel(result.avg_starters)}</span>
     </div>
     <div class="avg-sep"></div>
     <div class="avg-item">
       <span class="avg-val" style="color:#f59e0b">{result.avg_handtraps.toFixed(2)}</span>
-      <span class="avg-label">handtraps / main</span>
+      <span class="avg-label">handtraps / hand</span>
       <span class="avg-qual" style="color:{result.avg_handtraps >= 0.8 ? '#22c55e' : '#f59e0b'}">{avgLabel(result.avg_handtraps)}</span>
     </div>
     <div class="avg-sep"></div>
     <div class="avg-item">
       <span class="avg-val" style="color:#ef4444">{result.avg_garnets.toFixed(2)}</span>
-      <span class="avg-label">garnets / main</span>
+      <span class="avg-label">garnets / hand</span>
       <span class="avg-qual" style="color:{result.avg_garnets <= 0.3 ? '#22c55e' : result.avg_garnets <= 0.5 ? '#f59e0b' : '#ef4444'}">
-        {result.avg_garnets <= 0.3 ? 'OK' : result.avg_garnets <= 0.5 ? 'Élevé' : 'Trop élevé'}
+        {result.avg_garnets <= 0.3 ? 'OK' : result.avg_garnets <= 0.5 ? 'High' : 'Too high'}
       </span>
     </div>
   </section>
 
-  <!-- ── Starter distribution histogram ────────────────────────── -->
+  <!-- ── Starter distribution histogram ────────────────────── -->
   {#if result.starter_dist.length > 0}
     <section class="section">
-      <h2>Distribution des starters en main ({result.hand_size} cartes)</h2>
+      <h2>Starter distribution — {detailView === 5 ? 'Going First (5 cards)' : 'Going Second (6 cards)'}</h2>
       <div class="histogram">
         {#each result.starter_dist as entry}
           <div class="hist-col">
@@ -251,24 +378,35 @@
           </div>
         {/each}
       </div>
+      <p class="hist-interp">
+        {#if result.starter_dist[0]}
+          You open 0 starters in <strong>{pct(result.starter_dist[0].pct)}</strong> of games
+          ({detailView === 5 ? 'Going First' : 'Going Second'}, {result.n_simulations.toLocaleString()} simulations).
+          {result.starter_dist[0].pct <= 0.20
+            ? 'Excellent starter density.'
+            : result.starter_dist[0].pct <= 0.30
+            ? 'Good — slightly above the 20% target.'
+            : 'Above the competitive target of ≤20%. Consider increasing your starter count.'}
+        {/if}
+      </p>
     </section>
   {/if}
 
-  <!-- ── Brick analysis ─────────────────────────────────────────── -->
+  <!-- ── Brick analysis ─────────────────────────────────────── -->
   {#if topBricks.length > 0}
     <section class="section">
-      <h2>Analyse des briques</h2>
+      <h2>Brick analysis — {detailView === 5 ? 'Going First' : 'Going Second'}</h2>
       <p class="section-sub">
-        Fréquence d'apparition dans une main morte (0 starter · 0 handtrap).
-        Une haute valeur indique une carte souvent "inutile en main".
+        How often each card appears in a dead hand (0 starters · 0 handtraps).
+        A high value means the card is frequently "stuck" in hand — a potential garnet or bricker.
       </p>
       <table class="brick-table">
         <thead>
           <tr>
-            <th>Carte</th>
-            <th>Rôle</th>
-            <th title="Fois vue dans une main morte / fois vue en main">Taux brique</th>
-            <th>Apparitions totales</th>
+            <th>Card</th>
+            <th>Role</th>
+            <th title="Appearances in a dead hand / total appearances in hand">Brick rate</th>
+            <th>Total appearances</th>
           </tr>
         </thead>
         <tbody>
@@ -307,12 +445,13 @@
 
 <style>
   .page {
-    max-width: 860px;
+    max-width: 900px;
     margin: 0 auto;
     padding: 1.5rem 1rem 4rem;
     color: #e2e8f0;
   }
 
+  /* Topbar */
   .topbar {
     display: flex;
     align-items: center;
@@ -346,7 +485,7 @@
     background: #0f172a;
     border: 1px solid #1e293b;
     border-radius: 12px;
-    padding: 1rem 1.25rem;
+    padding: 0.875rem 1.25rem;
     margin-bottom: 1.25rem;
   }
   .ctrl-group { display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap; }
@@ -363,6 +502,9 @@
 
   .run-btn {
     margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     padding: 0.5rem 1.25rem; border-radius: 8px;
     border: none; background: #6366f1; color: #fff;
     font-size: 0.875rem; font-weight: 600; cursor: pointer;
@@ -370,6 +512,212 @@
   }
   .run-btn:hover:not(:disabled) { opacity: 0.85; }
   .run-btn:disabled { opacity: 0.4; cursor: default; }
+
+  .run-spinner {
+    display: block;
+    width: 13px;
+    height: 13px;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.65s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Comparison panel ─────────────────────────────────────── */
+  .compare-panel {
+    background: #0a0f1a;
+    border: 1px solid #1e2d45;
+    border-radius: 14px;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+    overflow: hidden;
+  }
+
+  .compare-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .compare-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #94a3b8;
+  }
+  .compare-sub {
+    font-size: 0.7rem;
+    color: #334155;
+  }
+
+  /* 4-column grid: label | GF | GS | delta */
+  .compare-grid {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 0 1.5rem;
+    align-items: center;
+  }
+
+  .compare-col-hd {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #475569;
+    padding-bottom: 0.625rem;
+    border-bottom: 1px solid #1e293b;
+    margin-bottom: 0.625rem;
+    text-align: center;
+  }
+  .compare-col-hd:first-child { text-align: left; }
+
+  .gf-hd { color: #818cf8; }
+  .gs-hd { color: #34d399; }
+  .delta-hd { color: #64748b; }
+
+  .gf-label { display: block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #818cf8; }
+  .gs-label { display: block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #34d399; }
+  .hand-badge {
+    display: block;
+    font-size: 0.625rem;
+    font-weight: 500;
+    color: #334155;
+    margin-top: 0.1rem;
+    letter-spacing: 0.03em;
+  }
+
+  .compare-row-label {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid #0f172a;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .row-hint {
+    font-size: 0.65rem;
+    color: #334155;
+    font-style: italic;
+  }
+  .compare-val {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    text-align: center;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid #0f172a;
+  }
+  .compare-val.muted {
+    font-size: 0.875rem;
+    color: #cbd5e1;
+    font-weight: 600;
+  }
+  .compare-delta {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    text-align: center;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid #0f172a;
+    min-width: 64px;
+  }
+
+  /* Interpretation row */
+  .interpret-row {
+    display: flex;
+    gap: 0;
+    margin-top: 1rem;
+    background: #0f172a;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .interpret-item {
+    flex: 1;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.625rem 0.875rem;
+    font-size: 0.75rem;
+    color: #64748b;
+    line-height: 1.5;
+  }
+  .interpret-tag {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.6rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    color: #475569;
+    background: #1e293b;
+    border-radius: 3px;
+    padding: 0.1rem 0.3rem;
+    flex-shrink: 0;
+    margin-top: 0.05rem;
+  }
+  .interpret-sep {
+    width: 1px;
+    background: #1e293b;
+  }
+  .interpret-text { color: #94a3b8; }
+
+  /* ── Detail switcher ─────────────────────────────────────── */
+  .detail-switcher {
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+    margin-bottom: 0.875rem;
+  }
+  .detail-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #475569;
+    white-space: nowrap;
+  }
+  .view-toggle {
+    display: flex;
+    border: 1px solid #1e293b;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .view-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 1rem;
+    background: #0f172a;
+    border: none;
+    border-right: 1px solid #1e293b;
+    color: #475569;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.02em;
+  }
+  .view-btn:last-child { border-right: none; }
+  .view-btn:hover:not(.view-btn--active) {
+    background: #1e293b;
+    color: #94a3b8;
+  }
+  .view-btn--active {
+    background: #1e293b;
+    color: #e2e8f0;
+  }
+  .view-btn--active:first-child { color: #818cf8; }
+  .view-btn--active:last-child { color: #34d399; }
+  .hand-tag {
+    font-size: 0.65rem;
+    font-weight: 500;
+    color: inherit;
+    opacity: 0.6;
+  }
 
   /* Rates */
   .rates-grid {
@@ -392,6 +740,13 @@
   .rate-sub { font-size: 0.7rem; color: #475569; }
   .rate-bar-track { width: 100%; height: 4px; background: #1e293b; border-radius: 2px; margin-top: 0.5rem; overflow: hidden; }
   .rate-bar { height: 100%; border-radius: 2px; transition: width 0.6s; }
+  .rate-interp {
+    font-size: 0.68rem;
+    color: #475569;
+    line-height: 1.5;
+    margin-top: 0.25rem;
+    text-align: center;
+  }
 
   /* Averages row */
   .avgs-row {
@@ -427,6 +782,7 @@
     align-items: flex-end;
     gap: 1rem;
     height: 140px;
+    margin-bottom: 0.875rem;
   }
   .hist-col {
     flex: 1;
@@ -448,6 +804,16 @@
   }
   .hist-bar { width: 100%; border-radius: 4px 4px 0 0; transition: height 0.5s; }
   .hist-label { font-size: 0.7rem; color: #64748b; text-align: center; }
+
+  .hist-interp {
+    font-size: 0.775rem;
+    color: #475569;
+    line-height: 1.6;
+    margin: 0;
+    padding-top: 0.375rem;
+    border-top: 1px solid #1e293b;
+  }
+  .hist-interp strong { color: #94a3b8; }
 
   /* Brick table */
   .brick-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }

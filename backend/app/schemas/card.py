@@ -23,6 +23,8 @@ class CardOut(BaseModel):
     description: str | None = None
     tcg_date: datetime | None = None
     ocg_date: datetime | None = None
+    cardmarket_price: float | None = None
+    tcgplayer_price: float | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -37,3 +39,22 @@ class CardListOut(BaseModel):
     total: int
     page: int
     limit: int
+
+
+class CurrentBanlistStatus(BaseModel):
+    tcg: str | None = None
+    ocg: str | None = None
+
+
+class DeckUsingCardOut(BaseModel):
+    deck_id: int
+    title: str
+    archetype_label: str | None = None
+
+
+class CardDetailOut(CardOut):
+    pend_description: str | None = None
+    monster_description: str | None = None
+    current_banlist_status: CurrentBanlistStatus
+    decks_using: list[DeckUsingCardOut]
+    decks_using_total: int

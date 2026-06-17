@@ -1,3 +1,6 @@
+import io
+import zipfile
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from app.dependencies import get_current_user
@@ -9,22 +12,31 @@ from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models import Card, Deck, DeckCard, DeckSubmission
 from app.models.banlist import Banlist, BanlistEntry
-from app.models.enums import CardSection
+from app.models.enums import CardSection, DeckSourceType
 from app.schemas.banlist import DeckLegalityOut, LegalityViolation, RestrictedCard
 from app.schemas.deck import (
+    BulkImportItemOut,
+    BulkImportOut,
     DeckCardOut,
     DeckCreateIn,
     DeckDetailOut,
     DeckImportOut,
     DeckListOut,
     DeckUpdateIn,
+    TextImportIn,
+    TextImportOut,
+    UrlImportIn,
 )
 from app.services.deck_import_service import deck_import_service
+from app.services.text_import_service import parse_text
+from app.services.url_import_service import import_from_url as fetch_deck_from_url
 from app.services.ydk_parser import parse as parse_ydk
 
 router = APIRouter(tags=["decks"])
 
 _MAX_UPLOAD_BYTES = 512 * 1024
+_MAX_BULK_BYTES = 10 * 1024 * 1024  # 10 MB for ZIP archives
+_MAX_BULK_FILES = 50
 
 
 @router.post("/import/ydk", response_model=DeckImportOut, status_code=201)
@@ -54,6 +66,132 @@ async def import_ydk(
 
     deck_title = (title or "").strip() or filename.removesuffix(".ydk") or "Imported Deck"
     return await deck_import_service.import_ydk(db, parsed, deck_title)
+
+
+@router.post("/import/url", response_model=DeckImportOut, status_code=201)
+async def import_url(
+    body: UrlImportIn,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> DeckImportOut:
+    """Import a deck from a ydke:// URL, a direct .ydk file URL, or a YGOProDeck deck page."""
+    import httpx
+
+    try:
+        parsed, title_hint = await fetch_deck_from_url(body.url)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not fetch URL (HTTP {exc.response.status_code})",
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=422, detail=f"Network error: {exc}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if parsed.is_empty:
+        raise HTTPException(status_code=422, detail="No card IDs found at this URL")
+
+    title = (body.title or "").strip() or title_hint or "Imported Deck"
+    return await deck_import_service.import_ydk(
+        db, parsed, title, source_type=DeckSourceType.api_import
+    )
+
+
+@router.post("/import/text", response_model=TextImportOut, status_code=201)
+async def import_text(
+    body: TextImportIn,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> TextImportOut:
+    """Import a deck from a free-form card list (e.g. '3x Dark Hole', 'Ash Blossom x3')."""
+    parsed = parse_text(body.text)
+    if parsed.is_empty:
+        raise HTTPException(status_code=422, detail="No card entries found in the text")
+    title = (body.title or "").strip() or "Imported Deck"
+    return await deck_import_service.import_text(db, parsed, title)
+
+
+@router.post("/import/bulk", response_model=BulkImportOut, status_code=201)
+async def import_bulk(
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> BulkImportOut:
+    """Import multiple .ydk files or a single ZIP archive in one request."""
+    if not files:
+        raise HTTPException(status_code=422, detail="No files provided")
+    if len(files) > _MAX_BULK_FILES:
+        raise HTTPException(status_code=422, detail=f"Too many files (max {_MAX_BULK_FILES})")
+
+    # Collect (basename, raw_bytes_or_None) pairs
+    entries: list[tuple[str, bytes | None]] = []
+
+    if len(files) == 1 and (files[0].filename or "").lower().endswith(".zip"):
+        zip_raw = await files[0].read(_MAX_BULK_BYTES + 1)
+        if len(zip_raw) > _MAX_BULK_BYTES:
+            raise HTTPException(status_code=413, detail="ZIP too large (max 10 MB)")
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(zip_raw))
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=422, detail="Invalid or corrupt ZIP file")
+        ydk_names = [
+            n for n in zf.namelist()
+            if n.lower().endswith(".ydk") and not n.startswith("__")
+        ]
+        if not ydk_names:
+            raise HTTPException(status_code=422, detail="ZIP contains no .ydk files")
+        if len(ydk_names) > _MAX_BULK_FILES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"ZIP contains too many .ydk files (max {_MAX_BULK_FILES})",
+            )
+        for zname in sorted(ydk_names):
+            basename = zname.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            entries.append((basename, zf.read(zname)))
+    else:
+        for uf in files:
+            fname = uf.filename or "deck.ydk"
+            if not fname.lower().endswith(".ydk"):
+                continue
+            raw = await uf.read(_MAX_UPLOAD_BYTES + 1)
+            entries.append((fname, None if len(raw) > _MAX_UPLOAD_BYTES else raw))
+
+    if not entries:
+        raise HTTPException(status_code=422, detail="No .ydk files found in the upload")
+
+    items: list[BulkImportItemOut] = []
+    for fname, raw in entries:
+        deck_title = fname.removesuffix(".ydk") or "Imported Deck"
+        if raw is None:
+            items.append(BulkImportItemOut(filename=fname, title=deck_title, error="File too large (max 512 KB)"))
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+        parsed = parse_ydk(text)
+        if parsed.is_empty:
+            items.append(BulkImportItemOut(filename=fname, title=deck_title, error="No card IDs found"))
+            continue
+        try:
+            out = await deck_import_service.import_ydk(db, parsed, deck_title)
+            items.append(BulkImportItemOut(
+                filename=fname,
+                deck_id=out.deck_id,
+                submission_id=out.submission_id,
+                title=out.title,
+                main_count=out.main_count,
+                extra_count=out.extra_count,
+                side_count=out.side_count,
+                unknown_ids=out.unknown_ids,
+            ))
+        except Exception as exc:
+            await db.rollback()
+            items.append(BulkImportItemOut(filename=fname, title=deck_title, error=str(exc)))
+
+    imported = sum(1 for i in items if i.error is None)
+    return BulkImportOut(imported=imported, failed=len(items) - imported, items=items)
 
 
 @router.post("/manual", response_model=DeckImportOut, status_code=201)
@@ -131,6 +269,8 @@ async def get_deck(deck_id: int, db: AsyncSession = Depends(get_db)) -> DeckDeta
                 image_url=f"/api/v1/cards/{card.id}/image",
                 tcg_date=card.tcg_date,
                 ocg_date=card.ocg_date,
+                cardmarket_price=card.cardmarket_price,
+                tcgplayer_price=card.tcgplayer_price,
             )
             if dc.section == CardSection.main:
                 main.append(entry)
@@ -142,6 +282,12 @@ async def get_deck(deck_id: int, db: AsyncSession = Depends(get_db)) -> DeckDeta
     main.sort(key=lambda c: c.name)
     extra.sort(key=lambda c: c.name)
     side.sort(key=lambda c: c.name)
+
+    all_cards = main + extra + side
+    cardmarket_prices = [c.cardmarket_price * c.quantity for c in all_cards if c.cardmarket_price is not None]
+    tcgplayer_prices = [c.tcgplayer_price * c.quantity for c in all_cards if c.tcgplayer_price is not None]
+    budget_cardmarket = sum(cardmarket_prices) if cardmarket_prices else None
+    budget_tcgplayer = sum(tcgplayer_prices) if tcgplayer_prices else None
 
     return DeckDetailOut(
         id=deck.id,
@@ -156,6 +302,8 @@ async def get_deck(deck_id: int, db: AsyncSession = Depends(get_db)) -> DeckDeta
         main_count=sum(c.quantity for c in main),
         extra_count=sum(c.quantity for c in extra),
         side_count=sum(c.quantity for c in side),
+        budget_cardmarket=round(budget_cardmarket, 2) if budget_cardmarket is not None else None,
+        budget_tcgplayer=round(budget_tcgplayer, 2) if budget_tcgplayer is not None else None,
         created_at=deck.created_at,
         updated_at=deck.updated_at,
     )
@@ -203,20 +351,29 @@ async def delete_deck(
 async def get_deck_legality(
     deck_id: int,
     format: str = Query(default="TCG"),
+    banlist_id: int | None = Query(
+        default=None, description="Test against a specific banlist instead of the latest for `format`"
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> DeckLegalityOut:
-    """Check deck conformity against the latest banlist for a format (TCG or OCG)."""
+    """Check deck conformity against a banlist — the latest for `format`, or a specific `banlist_id`."""
     deck = await db.get(Deck, deck_id)
     if not deck:
         raise HTTPException(status_code=404, detail="Deck not found")
 
-    fmt = format.upper()
-    banlist = await db.scalar(
-        select(Banlist)
-        .where(Banlist.format == fmt)
-        .order_by(Banlist.created_at.desc())
-        .limit(1)
-    )
+    if banlist_id is not None:
+        banlist = await db.get(Banlist, banlist_id)
+        if not banlist:
+            raise HTTPException(status_code=404, detail="Banlist not found")
+        fmt = banlist.format
+    else:
+        fmt = format.upper()
+        banlist = await db.scalar(
+            select(Banlist)
+            .where(Banlist.format == fmt)
+            .order_by(Banlist.created_at.desc())
+            .limit(1)
+        )
 
     if not banlist:
         return DeckLegalityOut(deck_id=deck_id, format=fmt, is_legal=True, violations=[])

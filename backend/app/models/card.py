@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -31,6 +31,8 @@ class Card(Base):
     monster_description: Mapped[str | None] = mapped_column(Text)
     tcg_date: Mapped[datetime | None] = mapped_column()
     ocg_date: Mapped[datetime | None] = mapped_column()
+    cardmarket_price: Mapped[float | None] = mapped_column(Float)
+    tcgplayer_price: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 

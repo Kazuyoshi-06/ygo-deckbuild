@@ -22,7 +22,7 @@
     if (!r) return [];
     const items: FlatItem[] = [];
     for (const c of r.cards)
-      items.push({ url: `/cards?q=${encodeURIComponent(c.name)}`, label: c.name, kind: 'card' });
+      items.push({ url: `/cards/${c.id}`, label: c.name, kind: 'card' });
     for (const d of r.decks)
       items.push({ url: `/decks/${d.id}`, label: d.title, kind: 'deck' });
     for (const a of r.archetypes)

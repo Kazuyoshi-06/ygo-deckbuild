@@ -99,6 +99,7 @@ class CardSyncService:
     def _transform_card(self, raw: dict) -> dict:
         name = raw["name"]
         misc = (raw.get("misc_info") or [{}])[0]
+        prices = (raw.get("card_prices") or [{}])[0]
         level_or_rank = raw.get("level") or raw.get("rank")
 
         return {
@@ -120,6 +121,8 @@ class CardSyncService:
             "monster_description": raw.get("monster_desc"),
             "tcg_date": self._parse_date(misc.get("tcg_date")),
             "ocg_date": self._parse_date(misc.get("ocg_date")),
+            "cardmarket_price": self._parse_price(prices.get("cardmarket_price")),
+            "tcgplayer_price": self._parse_price(prices.get("tcgplayer_price")),
         }
 
     def _parse_date(self, value: str | None) -> datetime | None:
@@ -127,6 +130,14 @@ class CardSyncService:
             return None
         try:
             return datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            return None
+
+    def _parse_price(self, value: str | None) -> float | None:
+        if not value:
+            return None
+        try:
+            return float(value)
         except ValueError:
             return None
 

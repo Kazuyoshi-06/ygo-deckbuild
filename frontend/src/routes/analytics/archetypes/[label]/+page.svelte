@@ -47,6 +47,13 @@
   // Active tab for card sections
   let activeTab: 'core' | 'flex' | 'tech' = $state('core');
 
+  // ── Image skeleton loading (T2.8) ────────────────────────────────────────
+  let loadedImages = $state(new Set<number>());
+
+  function markImageLoaded(cardId: number) {
+    loadedImages.add(cardId);
+  }
+
   // ECharts color palette (matches design system)
   const C = {
     gold:   '#C9A449',
@@ -369,12 +376,13 @@
           {#each activeCards as card (card.card_id)}
             <div class="card-row">
               <!-- Thumbnail -->
-              <div class="card-thumb-wrap">
+              <div class="card-thumb-wrap" class:skeleton={!loadedImages.has(card.card_id)}>
                 <img
                   src={card.image_url}
                   alt={card.name}
                   class="card-thumb"
                   loading="lazy"
+                  onload={() => markImageLoaded(card.card_id)}
                   onerror={(e) => { (e.target as HTMLImageElement).src = '/media/placeholder-card.svg'; }}
                 />
               </div>
@@ -694,6 +702,18 @@
     border-radius: 3px;
     overflow: hidden;
     background: var(--bg-elevated);
+  }
+
+  /* Shimmer while the card image is still loading (T2.8) */
+  .card-thumb-wrap.skeleton {
+    background: linear-gradient(
+      90deg,
+      var(--bg-elevated) 25%,
+      var(--bg-overlay) 50%,
+      var(--bg-elevated) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
   }
 
   .card-thumb {

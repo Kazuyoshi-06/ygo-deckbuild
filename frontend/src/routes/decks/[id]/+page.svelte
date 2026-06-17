@@ -11,6 +11,8 @@
     image_url: string;
     tcg_date: string | null;
     ocg_date: string | null;
+    cardmarket_price: number | null;
+    tcgplayer_price: number | null;
   }
 
   interface LegalityViolation {
@@ -59,11 +61,30 @@
     main_count: number;
     extra_count: number;
     side_count: number;
+    budget_cardmarket: number | null;
+    budget_tcgplayer: number | null;
     created_at: string;
     updated_at: string;
   }
 
-  let { data } = $props<{ data: { deck: Deck; legalityTCG: Legality | null; legalityOCG: Legality | null } }>();
+  interface BanlistSummary {
+    id: number;
+    format: string;
+    effective_date: string;
+    version_label: string | null;
+    forbidden_count: number;
+    limited_count: number;
+    semi_limited_count: number;
+  }
+
+  let { data } = $props<{
+    data: {
+      deck: Deck;
+      legalityTCG: Legality | null;
+      legalityOCG: Legality | null;
+      allBanlists: BanlistSummary[];
+    };
+  }>();
   let deck = $derived(data.deck);
 
   let activeFormat: 'TCG' | 'OCG' = $state('TCG');
@@ -172,6 +193,11 @@
     }
   }
 
+  function formatPrice(value: number | null, currency: 'EUR' | 'USD'): string {
+    if (value === null) return '—';
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(value);
+  }
+
   function formatDate(iso: string) {
     return new Date(iso).toLocaleDateString('en-US', {
       month: 'long',
@@ -183,6 +209,50 @@
   function handleImgError(e: Event) {
     const img = e.target as HTMLImageElement;
     img.src = '/media/placeholder-card.svg';
+  }
+
+  // ── Image skeleton loading (T2.8) ────────────────────────────────────────
+  let loadedImages = $state(new Set<number>());
+
+  function markImageLoaded(cardId: number) {
+    loadedImages.add(cardId);
+  }
+
+  // ── Banlist impact test (T3.2) ───────────────────────────────────────────
+  let sortedBanlists = $derived(
+    [...data.allBanlists].sort((a: BanlistSummary, b: BanlistSummary) => {
+      if (a.format !== b.format) return a.format.localeCompare(b.format);
+      return b.effective_date.localeCompare(a.effective_date);
+    })
+  );
+
+  let testBanlistId: string = $state('');
+  let testResult: Legality | null = $state(null);
+  let testLoading: boolean = $state(false);
+  let testError: string = $state('');
+
+  function banlistOptionLabel(b: BanlistSummary): string {
+    return `${b.format} — ${b.version_label ?? b.effective_date}`;
+  }
+
+  async function runBanlistTest() {
+    if (!testBanlistId) return;
+    testLoading = true;
+    testError = '';
+    testResult = null;
+    try {
+      const res = await fetch(`/api/v1/decks/${deck.id}/legality?banlist_id=${testBanlistId}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        testError = body?.detail ?? `Request failed (${res.status})`;
+        return;
+      }
+      testResult = await res.json();
+    } catch {
+      testError = 'Network error';
+    } finally {
+      testLoading = false;
+    }
   }
 
   // ── Export ──────────────────────────────────────────────────────────────────
@@ -210,6 +280,43 @@
   }
 
   let copyFeedback = $state(false);
+  let shareOpen = $state(false);
+  let shareCopied = $state(false);
+  let qrSvg = $state('');
+
+  async function openShare() {
+    const url = window.location.href;
+
+    // Copy URL to clipboard
+    try {
+      await navigator.clipboard.writeText(url);
+      shareCopied = true;
+      setTimeout(() => (shareCopied = false), 2500);
+    } catch {
+      // clipboard unavailable (non-secure context)
+    }
+
+    // Generate QR on first open (lazy-load library)
+    if (!qrSvg) {
+      try {
+        const { toString: qrToString } = await import('qrcode');
+        qrSvg = await qrToString(url, {
+          type: 'svg',
+          margin: 1,
+          width: 192,
+          color: { dark: '#ffffff', light: '#0d0f14' },
+        });
+      } catch {
+        // QR generation failed — popover still shows URL
+      }
+    }
+
+    shareOpen = true;
+  }
+
+  function closeShare() {
+    shareOpen = false;
+  }
 
   async function copyAsText() {
     const parts: string[] = [];
@@ -327,6 +434,16 @@
           <span class="meta-label">Side</span>
           <span class="meta-value">{deck.side_count}</span>
         </div>
+        {#if deck.budget_cardmarket !== null}
+          <div class="meta-divider" aria-hidden="true"></div>
+          <div
+            class="meta-item"
+            title="TCGplayer: {formatPrice(deck.budget_tcgplayer, 'USD')}"
+          >
+            <span class="meta-label">Budget</span>
+            <span class="meta-value meta-value--budget">{formatPrice(deck.budget_cardmarket, 'EUR')}</span>
+          </div>
+        {/if}
       </div>
 
       <div class="meta-actions">
@@ -337,6 +454,7 @@
         <a href="/decks/{deck.id}/score" class="btn-analytics btn-score">Score ↗</a>
         <a href="/decks/{deck.id}/side-optimizer" class="btn-analytics btn-side">Side ↗</a>
         <a href="/decks/{deck.id}/matchups" class="btn-analytics btn-matchups">Matchups ↗</a>
+        <a href="/decks/{deck.id}/prep" class="btn-analytics btn-prep">Tournament Prep ↗</a>
 
         <div class="format-toggle" role="group" aria-label="Select format">
           {#each (['TCG', 'OCG'] as const) as fmt}
@@ -370,6 +488,56 @@
           >
             {copyFeedback ? '✓ Copied' : '⎘ Copy list'}
           </button>
+
+          <!-- Share button + popover -->
+          <div class="share-wrap">
+            <button
+              class="btn-mgmt btn-mgmt--share"
+              class:btn-mgmt--active={shareOpen}
+              onclick={openShare}
+              title="Share this deck"
+              aria-expanded={shareOpen}
+              aria-haspopup="dialog"
+            >
+              ↗ Share
+            </button>
+
+            {#if shareOpen}
+              <!-- Click-outside overlay -->
+              <div
+                class="share-overlay"
+                role="presentation"
+                onclick={closeShare}
+                onkeydown={(e) => e.key === 'Escape' && closeShare()}
+              ></div>
+
+              <!-- Share popover -->
+              <div class="share-popover" role="dialog" aria-label="Share deck">
+                <div class="share-popover-header">
+                  <span class="share-popover-title">Share Deck</span>
+                  <button class="share-close" onclick={closeShare} aria-label="Close">×</button>
+                </div>
+
+                <div class="share-url-row">
+                  <span class="share-url-text">{typeof window !== 'undefined' ? window.location.href : ''}</span>
+                  {#if shareCopied}
+                    <span class="share-copied-badge">✓ Copied</span>
+                  {/if}
+                </div>
+
+                {#if qrSvg}
+                  <div class="share-qr" aria-label="QR code for this deck">
+                    {@html qrSvg}
+                  </div>
+                  <p class="share-qr-hint">Scan to open on another device</p>
+                {:else}
+                  <div class="share-qr-loading" aria-label="Generating QR code">
+                    <span class="share-qr-spinner" aria-hidden="true"></span>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
           {#if !$auth.enabled || $auth.user}
             {#if !editing}
               <button class="btn-mgmt" onclick={startEdit} title="Edit deck metadata">✎ Edit</button>
@@ -423,6 +591,7 @@
             {@const restricted = restrictedMap[c.card_id]}
             <div class="card-slot" title="{c.name}{c.quantity > 1 ? ` ×${c.quantity}` : ''}{badge ? ` [${badge}]` : ''}{restricted ? ` · ${restricted.status}` : ''}">
               <div class="card-img-wrap"
+                class:skeleton={!loadedImages.has(c.card_id)}
                 class:banned={violation?.status === 'forbidden'}
                 class:limited={restricted?.status === 'limited' && !violation}
                 class:limited-violation={violation?.status === 'limited'}
@@ -434,6 +603,7 @@
                   alt={c.name}
                   class="card-img"
                   loading="lazy"
+                  onload={() => markImageLoaded(c.card_id)}
                   onerror={handleImgError}
                 />
                 {#if badge}
@@ -455,6 +625,63 @@
       </section>
     {/if}
   {/each}
+
+  <!-- ── Banlist impact test (T3.2) ─────────────────────────────────────── -->
+  {#if data.allBanlists.length > 0}
+    <section class="deck-section">
+      <header class="section-header">
+        <h2 class="section-title">Banlist Impact Test</h2>
+        <span class="section-count">{data.allBanlists.length} banlists available</span>
+      </header>
+      <p class="banlist-test-hint">
+        Test this deck against any historical banlist — see how many copies of each restricted card would remain legal.
+      </p>
+      <div class="banlist-test-row">
+        <select class="banlist-select" bind:value={testBanlistId} aria-label="Select a banlist to test">
+          <option value="">Choose a banlist…</option>
+          {#each sortedBanlists as b (b.id)}
+            <option value={b.id}>{banlistOptionLabel(b)}</option>
+          {/each}
+        </select>
+        <button class="btn-ghost" onclick={runBanlistTest} disabled={!testBanlistId || testLoading}>
+          {testLoading ? 'Testing…' : 'Test this banlist'}
+        </button>
+      </div>
+
+      {#if testError}
+        <p class="banlist-test-error">{testError}</p>
+      {:else if testResult}
+        <div class="banlist-test-result">
+          <div class="legality-badge" class:legal={testResult.is_legal} class:illegal={!testResult.is_legal}>
+            <span class="legality-dot" aria-hidden="true"></span>
+            <span class="legality-label">
+              {testResult.is_legal
+                ? `${testResult.format} Legal`
+                : `${testResult.violations.length} violation${testResult.violations.length > 1 ? 's' : ''}`}
+            </span>
+          </div>
+
+          {#if testResult.violations.length > 0}
+            <ul class="banlist-test-violations">
+              {#each testResult.violations as v (v.card_id)}
+                <li>
+                  <strong>{v.name}</strong> — {v.status === 'forbidden' ? 'Forbidden' : v.status === 'limited' ? 'Limited' : 'Semi-Limited'}
+                  (max {v.limit_value}). You run {v.actual_quantity}
+                  {#if v.limit_value > 0}
+                    — keep {v.limit_value}, remove {v.actual_quantity - v.limit_value}
+                  {:else}
+                    — all {v.actual_quantity} copies must come out
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="banlist-test-clean">No restricted cards exceed their limit under this banlist.</p>
+          {/if}
+        </div>
+      {/if}
+    </section>
+  {/if}
 </div>
 
 <style>
@@ -661,6 +888,10 @@
     font-weight: 700;
     color: var(--text-primary);
     line-height: 1.2;
+  }
+
+  .meta-value--budget {
+    color: var(--gold);
   }
 
   .meta-actions {
@@ -969,6 +1200,14 @@
     border-color: #a855f7;
   }
 
+  .btn-prep {
+    border-color: rgba(244, 63, 94, 0.3);
+    color: #fb7185;
+  }
+  .btn-prep:hover {
+    border-color: #fb7185;
+  }
+
   .deck-date {
     font-size: 0.75rem;
     color: var(--text-tertiary);
@@ -1039,6 +1278,18 @@
     transition: border-color var(--duration-fast) var(--ease-out),
       transform var(--duration-fast) var(--ease-out),
       box-shadow var(--duration-fast) var(--ease-out);
+  }
+
+  /* Shimmer while the card image is still loading (T2.8) */
+  .card-img-wrap.skeleton {
+    background: linear-gradient(
+      90deg,
+      var(--bg-elevated) 25%,
+      var(--bg-overlay) 50%,
+      var(--bg-elevated) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
   }
 
   .card-slot:hover .card-img-wrap {
@@ -1187,6 +1438,78 @@
     background: #f87171;
   }
 
+  /* Banlist impact test (T3.2) */
+  .banlist-test-hint {
+    font-size: 0.8125rem;
+    color: var(--text-tertiary);
+    margin-bottom: 1rem;
+    max-width: 60ch;
+    line-height: 1.55;
+  }
+
+  .banlist-test-row {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+  }
+
+  .banlist-select {
+    flex: 1;
+    min-width: 220px;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.875rem;
+    outline: none;
+  }
+
+  .banlist-select:focus {
+    border-color: var(--gold);
+  }
+
+  .banlist-test-error {
+    font-size: 0.8125rem;
+    color: #f87171;
+  }
+
+  .banlist-test-result {
+    display: flex;
+    flex-direction: column;
+    gap: 0.875rem;
+    padding: 1rem 1.25rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+  }
+
+  .banlist-test-violations {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .banlist-test-violations li {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+
+  .banlist-test-violations strong {
+    color: #f87171;
+  }
+
+  .banlist-test-clean {
+    font-size: 0.8125rem;
+    color: #4ade80;
+  }
+
   .qty-badge {
     position: absolute;
     bottom: 4px;
@@ -1212,5 +1535,163 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
     text-align: center;
+  }
+
+  /* ── Share ──────────────────────────────────────────────────────────────── */
+  .share-wrap {
+    position: relative;
+  }
+
+  .btn-mgmt--share {
+    color: var(--gold);
+    border-color: rgba(201, 164, 73, 0.3);
+  }
+
+  .btn-mgmt--share:hover,
+  .btn-mgmt--active {
+    background: rgba(201, 164, 73, 0.08);
+    border-color: rgba(201, 164, 73, 0.5);
+    color: var(--gold);
+  }
+
+  .share-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+  }
+
+  .share-popover {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 8px);
+    z-index: 100;
+    width: 240px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+    animation: popover-in 0.12s var(--ease-out);
+  }
+
+  @keyframes popover-in {
+    from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .share-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.625rem 0.75rem 0.5rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .share-popover-title {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+
+  .share-close {
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 1rem;
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 0;
+    line-height: 1;
+    transition: color var(--duration-fast) var(--ease-out),
+      background var(--duration-fast) var(--ease-out);
+  }
+
+  .share-close:hover {
+    color: var(--text-primary);
+    background: var(--bg-overlay);
+  }
+
+  .share-url-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-subtle);
+    min-height: 38px;
+  }
+
+  .share-url-text {
+    flex: 1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.5625rem;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .share-copied-badge {
+    flex-shrink: 0;
+    font-size: 0.625rem;
+    font-weight: 700;
+    color: #4ade80;
+    white-space: nowrap;
+    animation: fadeIn 0.15s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  .share-qr {
+    display: flex;
+    justify-content: center;
+    padding: 0.875rem 0.75rem 0.25rem;
+  }
+
+  /* Ensure the inline SVG fills the popover width nicely */
+  .share-qr :global(svg) {
+    width: 192px;
+    height: 192px;
+    border-radius: var(--radius-sm);
+  }
+
+  .share-qr-hint {
+    font-size: 0.625rem;
+    color: var(--text-tertiary);
+    text-align: center;
+    padding: 0 0.75rem 0.75rem;
+    opacity: 0.7;
+  }
+
+  .share-qr-loading {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 2rem;
+  }
+
+  .share-qr-spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--border-default);
+    border-top-color: var(--gold);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 </style>

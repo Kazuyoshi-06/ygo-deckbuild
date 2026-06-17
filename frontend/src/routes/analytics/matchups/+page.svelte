@@ -33,7 +33,7 @@
     !matrix
       ? []
       : search.trim()
-      ? matrix.rows.filter((r) =>
+      ? matrix.rows.filter((r: ArchetypeMatrixRow) =>
           r.archetype.toLowerCase().includes(search.toLowerCase())
         )
       : matrix.rows

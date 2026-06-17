@@ -93,6 +93,34 @@ class BanlistSyncService:
 
         for fmt, _ in _FORMATS:
             entries = ban_data[fmt]
+
+            # Build fingerprint of incoming data: frozenset of (db_card_id, status_value)
+            incoming: dict[int, tuple[BanlistStatus, int]] = {}
+            for ext_id, (status, limit_val) in entries.items():
+                db_id = ext_to_db_id.get(ext_id)
+                if db_id is not None:
+                    incoming[db_id] = (status, limit_val)
+
+            incoming_fp = frozenset((db_id, st.value) for db_id, (st, _) in incoming.items())
+
+            # Compare with the latest existing banlist for this format
+            latest_bl = await db.scalar(
+                select(Banlist)
+                .where(Banlist.format == fmt)
+                .order_by(Banlist.created_at.desc())
+                .limit(1)
+            )
+            if latest_bl is not None:
+                existing_rows = await db.execute(
+                    select(BanlistEntry.card_id, BanlistEntry.status)
+                    .where(BanlistEntry.banlist_id == latest_bl.id)
+                )
+                existing_fp = frozenset((cid, st.value) for cid, st in existing_rows)
+                if existing_fp == incoming_fp:
+                    logger.info(f"Banlist {fmt}: no changes since last sync — skipping new record")
+                    created_banlists.append({"format": fmt, "banlist_id": latest_bl.id, "entries": len(incoming), "skipped": True})
+                    continue
+
             banlist = Banlist(
                 format=fmt,
                 source_name="YGOProDeck API",
@@ -103,10 +131,7 @@ class BanlistSyncService:
             db.add(banlist)
             await db.flush()
 
-            for ext_id, (status, limit_val) in entries.items():
-                db_id = ext_to_db_id.get(ext_id)
-                if db_id is None:
-                    continue
+            for db_id, (status, limit_val) in incoming.items():
                 db.add(BanlistEntry(
                     banlist_id=banlist.id,
                     card_id=db_id,
@@ -116,8 +141,8 @@ class BanlistSyncService:
                 total_entries += 1
 
             await db.commit()
-            created_banlists.append({"format": fmt, "banlist_id": banlist.id, "entries": len(entries)})
-            logger.info(f"Banlist {fmt} created: id={banlist.id}, {len(entries)} entries")
+            created_banlists.append({"format": fmt, "banlist_id": banlist.id, "entries": len(incoming)})
+            logger.info(f"Banlist {fmt} created: id={banlist.id}, {len(incoming)} entries")
 
         sync_run.status = SyncStatus.completed
         sync_run.finished_at = datetime.utcnow()

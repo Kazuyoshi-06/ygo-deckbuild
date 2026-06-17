@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +15,7 @@ from app.schemas.matchup import (
     MatchupMatrixOut,
     MatchupSummary,
 )
+from app.services import cache_service
 
 router = APIRouter(tags=["matchup"])
 
@@ -161,7 +162,12 @@ analytics_router = APIRouter(tags=["matchup"])
 
 
 @analytics_router.get("/matchups", response_model=MatchupMatrixOut)
-async def matchup_matrix(db: AsyncSession = Depends(get_db)) -> MatchupMatrixOut:
+async def matchup_matrix(request: Request, db: AsyncSession = Depends(get_db)) -> MatchupMatrixOut | Response:
+    """Cached for 5 minutes (T3.7) — invalidated whenever a deck is imported."""
+    cached = await cache_service.get_cached(request)
+    if cached is not None:
+        return Response(content=cached, media_type="application/json")
+
     rows = await db.execute(
         text(
             """
@@ -182,9 +188,11 @@ async def matchup_matrix(db: AsyncSession = Depends(get_db)) -> MatchupMatrixOut
     data = rows.mappings().all()
 
     if not data:
-        return MatchupMatrixOut(
+        result = MatchupMatrixOut(
             archetypes=[], rows=[], total_matches=0, has_data=False
         )
+        await cache_service.set_cached(request, result.model_dump_json())
+        return result
 
     # Collect all archetypes (both sides of every match)
     arch_total: dict[str, int] = defaultdict(int)
@@ -225,9 +233,11 @@ async def matchup_matrix(db: AsyncSession = Depends(get_db)) -> MatchupMatrixOut
             )
         )
 
-    return MatchupMatrixOut(
+    result = MatchupMatrixOut(
         archetypes=archetypes,
         rows=matrix_rows,
         total_matches=total_matches,
         has_data=True,
     )
+    await cache_service.set_cached(request, result.model_dump_json())
+    return result

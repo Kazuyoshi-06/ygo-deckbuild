@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import CardPreview from '$lib/components/CardPreview.svelte';
 
   interface CardItem {
     id: number;
@@ -15,6 +16,8 @@
     image_url: string;
     tcg_date: string | null;
     ocg_date: string | null;
+    cardmarket_price: number | null;
+    tcgplayer_price: number | null;
   }
 
   interface DeckSlot {
@@ -25,6 +28,19 @@
     quantity: number;
     tcg_date: string | null;
     ocg_date: string | null;
+    cardmarket_price: number | null;
+    archetype: string | null;
+  }
+
+  interface TechCard {
+    card_id: number;
+    name: string;
+    image_url: string;
+    type_label: string;
+    frame_type: string;
+    deck_count: number;
+    frequency: number;
+    avg_quantity: number;
   }
 
   function cardBadge(tcg_date: string | null, ocg_date: string | null): 'OCG' | 'TCG' | null {
@@ -34,7 +50,13 @@
     return null;
   }
 
-  let { data } = $props<{ data: { initialCards: CardItem[] } }>();
+  let { data } = $props<{
+    data: {
+      initialCards: CardItem[];
+      tcgBan: Record<number, string>;
+      ocgBan: Record<number, string>;
+    };
+  }>();
 
   // ── Deck state ────────────────────────────────────────────────────────────
   let deckTitle: string = $state('New Deck');
@@ -47,16 +69,85 @@
   let sideCount = $derived(sideDeck.reduce((s, c) => s + c.quantity, 0));
   let totalCards = $derived(mainCount + extraCount + sideCount);
 
+  function deckBudget(...decks: DeckSlot[][]): number | null {
+    let total = 0;
+    let hasPrice = false;
+    for (const deck of decks) {
+      for (const c of deck) {
+        if (c.cardmarket_price !== null) {
+          total += c.cardmarket_price * c.quantity;
+          hasPrice = true;
+        }
+      }
+    }
+    return hasPrice ? total : null;
+  }
+
+  let totalBudget = $derived(deckBudget(mainDeck, extraDeck, sideDeck));
+
+  function formatPrice(value: number | null): string {
+    if (value === null) return '—';
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'EUR' }).format(value);
+  }
+
   // ── Search state ──────────────────────────────────────────────────────────
   let searchQuery: string = $state('');
   let filterType: string = $state('');
   let filterAttribute: string = $state('');
+  let sortBy: string = $state('');
   let searchResults: CardItem[] = $state(untrack(() => data.initialCards));
   let searchLoading: boolean = $state(false);
+
+  // ── Advanced filters (T2.3) ──────────────────────────────────────────────
+  let showAdvanced: boolean = $state(false);
+  let filterRace: string = $state('');
+  let filterLevelMin: string = $state('');
+  let filterLevelMax: string = $state('');
+  let filterAtkMin: string = $state('');
+  let filterAtkMax: string = $state('');
+  let filterDefMin: string = $state('');
+  let filterDefMax: string = $state('');
+
+  let advancedActiveCount = $derived(
+    [filterRace, filterLevelMin, filterLevelMax, filterAtkMin, filterAtkMax, filterDefMin, filterDefMax]
+      .filter((v) => v !== '').length
+  );
+
+  function resetAdvancedFilters() {
+    filterRace = '';
+    filterLevelMin = '';
+    filterLevelMax = '';
+    filterAtkMin = '';
+    filterAtkMax = '';
+    filterDefMin = '';
+    filterDefMax = '';
+  }
 
   // ── Save state ────────────────────────────────────────────────────────────
   let saving: boolean = $state(false);
   let saveError: string = $state('');
+
+  // ── Deck validation ───────────────────────────────────────────────────────
+  interface ValidationIssue {
+    level: 'error' | 'warn';
+    msg: string;
+  }
+
+  let validationIssues = $derived<ValidationIssue[]>((() => {
+    const issues: ValidationIssue[] = [];
+    if (mainCount > 60)  issues.push({ level: 'error', msg: `Main deck: ${mainCount} cards — max 60` });
+    if (extraCount > 15) issues.push({ level: 'error', msg: `Extra deck: ${extraCount} cards — max 15` });
+    if (sideCount > 15)  issues.push({ level: 'error', msg: `Side deck: ${sideCount} cards — max 15` });
+    if (mainCount < 40 && mainCount > 0) issues.push({ level: 'warn', msg: `Main deck: ${mainCount} cards — needs at least 40 for tournament play` });
+    return issues;
+  })());
+
+  let hasErrors = $derived(validationIssues.some((i) => i.level === 'error'));
+
+  // ── Banlist enforcement ───────────────────────────────────────────────────
+  let activeBanFormat: 'TCG' | 'OCG' = $state('TCG');
+  let blockedMessage: string = $state('');
+  let blockedTimer: ReturnType<typeof setTimeout> | undefined;
 
   // ── Card section detection ────────────────────────────────────────────────
   const EXTRA_FRAMES = new Set([
@@ -68,10 +159,49 @@
     return EXTRA_FRAMES.has(frameType) ? 'extra' : 'main';
   }
 
+  // ── Banlist helpers ───────────────────────────────────────────────────────
+  function banLabel(st: string): string {
+    if (st === 'forbidden') return 'BAN';
+    if (st === 'limited') return '×1';
+    return '×2';
+  }
+
+  // Max copies allowed in active format (across ALL sections combined)
+  function maxAllowed(card_id: number): number {
+    const st = banMap[card_id];
+    if (st === 'forbidden') return 0;
+    if (st === 'limited') return 1;
+    if (st === 'semi_limited') return 2;
+    return 3;
+  }
+
   // ── Deck operations ───────────────────────────────────────────────────────
-  function addCard(card: CardItem, targetSection?: 'main' | 'extra' | 'side') {
+  interface AddableCard {
+    id: number;
+    name: string;
+    frame_type: string;
+    image_url: string;
+    tcg_date?: string | null;
+    ocg_date?: string | null;
+    cardmarket_price?: number | null;
+    archetype?: string | null;
+  }
+
+  function addCard(card: AddableCard, targetSection?: 'main' | 'extra' | 'side') {
     const section = targetSection ?? defaultSection(card.frame_type);
     const deck = section === 'main' ? mainDeck : section === 'extra' ? extraDeck : sideDeck;
+    const max = maxAllowed(card.id);
+
+    if (max === 0) {
+      blockedMessage = `${card.name} is Forbidden in ${activeBanFormat}`;
+      clearTimeout(blockedTimer);
+      blockedTimer = setTimeout(() => { blockedMessage = ''; }, 2500);
+      return;
+    }
+
+    const totalQty = deckQtyMap.get(card.id) ?? 0;
+    if (totalQty >= max) return;
+
     const existing = deck.find(c => c.card_id === card.id);
     if (existing) {
       if (existing.quantity < 3) existing.quantity++;
@@ -82,8 +212,10 @@
         frame_type: card.frame_type,
         image_url: card.image_url,
         quantity: 1,
-        tcg_date: card.tcg_date,
-        ocg_date: card.ocg_date,
+        tcg_date: card.tcg_date ?? null,
+        ocg_date: card.ocg_date ?? null,
+        cardmarket_price: card.cardmarket_price ?? null,
+        archetype: card.archetype ?? null,
       });
     }
   }
@@ -92,14 +224,24 @@
     const idx = deck.findIndex(c => c.card_id === card_id);
     if (idx === -1) return;
     const newQty = deck[idx].quantity + delta;
-    if (newQty <= 0) deck.splice(idx, 1);
-    else if (newQty <= 3) deck[idx].quantity = newQty;
+    if (newQty <= 0) {
+      deck.splice(idx, 1);
+    } else if (delta > 0) {
+      const totalQty = deckQtyMap.get(card_id) ?? 0;
+      if (totalQty >= maxAllowed(card_id)) return;
+      if (newQty <= 3) deck[idx].quantity = newQty;
+    } else {
+      deck[idx].quantity = newQty;
+    }
   }
 
   function removeCard(deck: DeckSlot[], card_id: number) {
     const idx = deck.findIndex(c => c.card_id === card_id);
     if (idx !== -1) deck.splice(idx, 1);
   }
+
+  // Active format's banlist map
+  let banMap = $derived(activeBanFormat === 'TCG' ? data.tcgBan : data.ocgBan);
 
   // Total quantity of a card across all sections
   let deckQtyMap = $derived(
@@ -112,6 +254,72 @@
     })()
   );
 
+  // ── Tech suggestions (T2.9) ──────────────────────────────────────────────
+  // Most common archetype among main/extra deck cards, weighted by quantity.
+  let deckArchetype = $derived(
+    (() => {
+      const counts = new Map<string, number>();
+      for (const c of [...mainDeck, ...extraDeck]) {
+        if (!c.archetype) continue;
+        counts.set(c.archetype, (counts.get(c.archetype) ?? 0) + c.quantity);
+      }
+      let best: string | null = null;
+      let bestCount = 0;
+      for (const [label, count] of counts) {
+        if (count > bestCount) {
+          best = label;
+          bestCount = count;
+        }
+      }
+      return best;
+    })()
+  );
+
+  let techSuggestions: TechCard[] = $state([]);
+  let techLoading: boolean = $state(false);
+  let techArchetype: string | null = $state(null);
+
+  $effect(() => {
+    const archetype = deckArchetype;
+    if (!archetype) {
+      techSuggestions = [];
+      techArchetype = null;
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      techLoading = true;
+      try {
+        const res = await fetch(
+          `/api/v1/analytics/archetypes/${encodeURIComponent(archetype)}/tech-suggestions?limit=10`
+        );
+        if (res.ok) {
+          const body = await res.json();
+          techSuggestions = body.cards ?? [];
+        } else {
+          techSuggestions = [];
+        }
+      } catch {
+        techSuggestions = [];
+      } finally {
+        techArchetype = archetype;
+        techLoading = false;
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  });
+
+  function addTechCard(card: TechCard) {
+    addCard({
+      id: card.card_id,
+      name: card.name,
+      frame_type: card.frame_type,
+      image_url: card.image_url,
+      archetype: techArchetype,
+    });
+  }
+
   // ── Debounced search ──────────────────────────────────────────────────────
   let firstRender = true;
 
@@ -119,6 +327,14 @@
     const q = searchQuery;
     const type = filterType;
     const attr = filterAttribute;
+    const sort = sortBy;
+    const race = filterRace;
+    const levelMin = filterLevelMin;
+    const levelMax = filterLevelMax;
+    const atkMin = filterAtkMin;
+    const atkMax = filterAtkMax;
+    const defMin = filterDefMin;
+    const defMax = filterDefMax;
 
     if (firstRender) {
       firstRender = false;
@@ -131,6 +347,14 @@
       if (q.trim()) params.set('q', q.trim());
       if (type) params.set('type', type);
       if (attr) params.set('attribute', attr);
+      if (sort) params.set('sort', sort);
+      if (race) params.set('race', race);
+      if (levelMin) params.set('level_min', levelMin);
+      if (levelMax) params.set('level_max', levelMax);
+      if (atkMin) params.set('atk_min', atkMin);
+      if (atkMax) params.set('atk_max', atkMax);
+      if (defMin) params.set('def_min', defMin);
+      if (defMax) params.set('def_max', defMax);
 
       const res = await fetch(`/api/v1/cards?${params}`);
       const data = await res.json();
@@ -180,12 +404,97 @@
         saving = false;
         return;
       }
+      clearDraft();
       goto(`/decks/${body.deck_id}`);
     } catch {
       saveError = 'Network error';
       saving = false;
     }
   }
+
+  // ── Autosave draft (localStorage) ────────────────────────────────────────
+  const DRAFT_KEY = 'ygo-builder-draft';
+  const AUTOSAVE_INTERVAL_MS = 30_000;
+
+  interface DraftPayload {
+    title: string;
+    mainDeck: DeckSlot[];
+    extraDeck: DeckSlot[];
+    sideDeck: DeckSlot[];
+    savedAt: string;
+  }
+
+  let draftSavedFlash: boolean = $state(false);
+  let draftRestoredAt: string | null = $state(null);
+  let draftFlashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function clearDraft() {
+    localStorage.removeItem(DRAFT_KEY);
+  }
+
+  function saveDraft() {
+    if (totalCards === 0) {
+      clearDraft();
+      return;
+    }
+    const payload: DraftPayload = {
+      title: deckTitle,
+      mainDeck,
+      extraDeck,
+      sideDeck,
+      savedAt: new Date().toISOString(),
+    };
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
+    } catch {
+      return;
+    }
+    draftSavedFlash = true;
+    clearTimeout(draftFlashTimer);
+    draftFlashTimer = setTimeout(() => { draftSavedFlash = false; }, 2500);
+  }
+
+  function loadDraft(): DraftPayload | null {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as DraftPayload;
+      if (!parsed || !Array.isArray(parsed.mainDeck)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  function discardDraft() {
+    clearDraft();
+    draftRestoredAt = null;
+    deckTitle = 'New Deck';
+    mainDeck = [];
+    extraDeck = [];
+    sideDeck = [];
+  }
+
+  function formatDraftTime(iso: string): string {
+    return new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  onMount(() => {
+    const draft = loadDraft();
+    if (draft) {
+      deckTitle = draft.title;
+      mainDeck = draft.mainDeck;
+      extraDeck = draft.extraDeck;
+      sideDeck = draft.sideDeck;
+      draftRestoredAt = draft.savedAt;
+    }
+
+    const interval = setInterval(saveDraft, AUTOSAVE_INTERVAL_MS);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(draftFlashTimer);
+    };
+  });
 
   const CARD_TYPES = [
     'Effect Monster', 'Normal Monster', 'Ritual Monster', 'Gemini Monster',
@@ -196,6 +505,34 @@
   ];
 
   const ATTRIBUTES = ['DARK', 'LIGHT', 'EARTH', 'WATER', 'FIRE', 'WIND', 'DIVINE'];
+
+  const RACES = [
+    'Aqua', 'Beast', 'Beast-Warrior', 'Creator God', 'Cyberse', 'Dinosaur',
+    'Divine-Beast', 'Dragon', 'Fairy', 'Fiend', 'Fish', 'Illusion', 'Insect',
+    'Machine', 'Plant', 'Psychic', 'Pyro', 'Reptile', 'Rock', 'Sea Serpent',
+    'Spellcaster', 'Thunder', 'Warrior', 'Winged Beast', 'Wyrm', 'Zombie',
+  ];
+
+  // ── Card hover preview ────────────────────────────────────────────────────
+  let previewCardId: number | null = $state(null);
+  let previewX = $state(0);
+  let previewY = $state(0);
+  let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function showPreview(id: number, e: MouseEvent) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      previewCardId = id;
+      previewX = rect.right;
+      previewY = rect.top + rect.height / 2;
+    }, 120);
+  }
+
+  function hidePreview() {
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+    previewCardId = null;
+  }
 </script>
 
 <svelte:head>
@@ -214,16 +551,39 @@
       maxlength="255"
       aria-label="Deck name"
     />
+    {#if draftSavedFlash}
+      <span class="draft-badge" role="status">● Draft saved</span>
+    {/if}
   </div>
   <div class="topbar-right">
-    {#if saveError}
+    {#if blockedMessage}
+      <span class="blocked-msg" role="alert">{blockedMessage}</span>
+    {:else if saveError}
       <span class="save-error">{saveError}</span>
     {/if}
+
+    <!-- Format toggle for banlist enforcement -->
+    <div class="ban-format-toggle" role="group" aria-label="Banlist format">
+      <span class="ban-format-label">Banlist</span>
+      {#each (['TCG', 'OCG'] as const) as fmt}
+        <button
+          class="ban-fmt-btn"
+          class:active={activeBanFormat === fmt}
+          onclick={() => (activeBanFormat = fmt)}
+          aria-pressed={activeBanFormat === fmt}
+        >{fmt}</button>
+      {/each}
+    </div>
+
     <span class="total-badge" class:has-cards={totalCards > 0}>{totalCards} cards</span>
+    {#if totalBudget !== null}
+      <span class="budget-badge">{formatPrice(totalBudget)}</span>
+    {/if}
     <button
       class="btn-primary save-btn"
       onclick={saveDeck}
-      disabled={saving || totalCards === 0 || !deckTitle.trim()}
+      disabled={saving || totalCards === 0 || !deckTitle.trim() || hasErrors}
+      title={hasErrors ? 'Fix deck errors before saving' : undefined}
     >
       {#if saving}
         <span class="spinner" aria-hidden="true"></span> Saving…
@@ -233,6 +593,32 @@
     </button>
   </div>
 </div>
+
+<!-- ── Draft restored notice ──────────────────────────────────────────────── -->
+{#if draftRestoredAt}
+  <div class="draft-notice" role="status">
+    <span>Restored unsaved draft from {formatDraftTime(draftRestoredAt)}.</span>
+    <button type="button" class="draft-notice-discard" onclick={discardDraft}>Discard</button>
+    <button
+      type="button"
+      class="draft-notice-dismiss"
+      onclick={() => (draftRestoredAt = null)}
+      aria-label="Dismiss"
+    >×</button>
+  </div>
+{/if}
+
+<!-- ── Validation strip ───────────────────────────────────────────────────── -->
+{#if validationIssues.length > 0}
+  <div class="validation-strip" role="alert" aria-live="polite">
+    {#each validationIssues as issue (issue.msg)}
+      <span class="val-issue val-issue--{issue.level}">
+        <span class="val-icon" aria-hidden="true">{issue.level === 'error' ? '✕' : '!'}</span>
+        {issue.msg}
+      </span>
+    {/each}
+  </div>
+{/if}
 
 <!-- ── Builder body ───────────────────────────────────────────────────────── -->
 <div class="builder-layout">
@@ -262,26 +648,124 @@
           <option value={a}>{a}</option>
         {/each}
       </select>
+      <select class="filter-select filter-select--full" bind:value={sortBy} aria-label="Sort by">
+        <option value="">Sort: Name</option>
+        <option value="price_asc">Sort: Price ↑</option>
+        <option value="price_desc">Sort: Price ↓</option>
+      </select>
     </div>
 
-    {#if searchLoading}
-      <div class="search-loading">
-        <span class="spinner-dark" aria-hidden="true"></span>
+    <button
+      type="button"
+      class="advanced-toggle"
+      onclick={() => (showAdvanced = !showAdvanced)}
+      aria-expanded={showAdvanced}
+    >
+      <span>Advanced filters{advancedActiveCount > 0 ? ` (${advancedActiveCount})` : ''}</span>
+      <span class="advanced-chevron" class:advanced-chevron--open={showAdvanced} aria-hidden="true">▾</span>
+    </button>
+
+    {#if showAdvanced}
+      <div class="advanced-panel">
+        <select class="filter-select filter-select--full" bind:value={filterRace} aria-label="Filter by race">
+          <option value="">All races</option>
+          {#each RACES as r}
+            <option value={r}>{r}</option>
+          {/each}
+        </select>
+        <div class="range-row">
+          <span class="range-label">Level/Rank/Link</span>
+          <input
+            type="number"
+            class="range-input"
+            placeholder="Min"
+            bind:value={filterLevelMin}
+            aria-label="Minimum Level/Rank/Link"
+            min="0"
+            max="13"
+          />
+          <span class="range-sep">–</span>
+          <input
+            type="number"
+            class="range-input"
+            placeholder="Max"
+            bind:value={filterLevelMax}
+            aria-label="Maximum Level/Rank/Link"
+            min="0"
+            max="13"
+          />
+        </div>
+        <div class="range-row">
+          <span class="range-label">ATK</span>
+          <input
+            type="number"
+            class="range-input"
+            placeholder="Min"
+            bind:value={filterAtkMin}
+            aria-label="Minimum ATK"
+            min="0"
+          />
+          <span class="range-sep">–</span>
+          <input
+            type="number"
+            class="range-input"
+            placeholder="Max"
+            bind:value={filterAtkMax}
+            aria-label="Maximum ATK"
+            min="0"
+          />
+        </div>
+        <div class="range-row">
+          <span class="range-label">DEF</span>
+          <input
+            type="number"
+            class="range-input"
+            placeholder="Min"
+            bind:value={filterDefMin}
+            aria-label="Minimum DEF"
+            min="0"
+          />
+          <span class="range-sep">–</span>
+          <input
+            type="number"
+            class="range-input"
+            placeholder="Max"
+            bind:value={filterDefMax}
+            aria-label="Maximum DEF"
+            min="0"
+          />
+        </div>
+        {#if advancedActiveCount > 0}
+          <button type="button" class="advanced-clear" onclick={resetAdvancedFilters}>Clear advanced filters</button>
+        {/if}
       </div>
+    {/if}
+
+    {#if searchLoading}
+      <ul class="card-grid-sm" aria-label="Loading cards" aria-busy="true">
+        {#each Array(12) as _, i (i)}
+          <li><div class="skeleton card-thumb-skeleton"></div></li>
+        {/each}
+      </ul>
     {:else if searchResults.length === 0}
       <div class="search-empty">No cards found</div>
     {:else}
       <ul class="card-grid-sm" aria-label="Search results">
         {#each searchResults as card (card.id)}
           {@const qty = deckQtyMap.get(card.id) ?? 0}
-          {@const maxed = qty >= 3}
+          {@const max = maxAllowed(card.id)}
+          {@const maxed = qty >= max}
           {@const badge = cardBadge(card.tcg_date, card.ocg_date)}
+          {@const banSt = banMap[card.id] ?? null}
           <li>
             <button
               class="card-thumb"
               class:maxed
-              title="{card.name}{qty > 0 ? ` (×${qty} in deck)` : ''}{badge ? ` [${badge}]` : ''} · Ctrl+click to add to side"
+              class:card-thumb--banned={banSt === 'forbidden'}
+              title="{card.name}{qty > 0 ? ` (×${qty} in deck)` : ''}{badge ? ` [${badge}]` : ''}{banSt ? ` · ${activeBanFormat}: ${banLabel(banSt)}` : ''} · Ctrl+click to add to side"
               onclick={(e) => addCard(card, (e as MouseEvent).ctrlKey || (e as MouseEvent).metaKey ? 'side' : undefined)}
+              onmouseenter={(e) => showPreview(card.id, e)}
+              onmouseleave={hidePreview}
               aria-label="Add {card.name} to deck"
             >
               <img
@@ -294,13 +778,73 @@
               {#if badge}
                 <span class="format-badge format-badge--{badge.toLowerCase()}">{badge}</span>
               {/if}
+              {#if banSt}
+                <span class="ban-strip ban-strip--{banSt}" aria-hidden="true"></span>
+                <span class="ban-chip ban-chip--{banSt}">{banLabel(banSt)}</span>
+              {/if}
               {#if qty > 0}
                 <span class="qty-overlay" class:maxed>{qty}</span>
+              {/if}
+              {#if card.cardmarket_price !== null}
+                <span class="price-chip">{formatPrice(card.cardmarket_price)}</span>
               {/if}
             </button>
           </li>
         {/each}
       </ul>
+    {/if}
+
+    <!-- ── Tech suggestions (T2.9) ───────────────────────────────────────── -->
+    {#if deckArchetype}
+      <div class="tech-section">
+        <h3 class="tech-label">
+          Tech suggestions <span class="tech-archetype">— {deckArchetype}</span>
+        </h3>
+        {#if techLoading && techSuggestions.length === 0}
+          <div class="tech-loading">
+            <span class="spinner-dark" aria-hidden="true"></span>
+          </div>
+        {:else if techSuggestions.length === 0}
+          <p class="tech-empty">No tech cards found for this archetype yet.</p>
+        {:else}
+          <ul class="card-grid-sm" aria-label="Tech suggestions">
+            {#each techSuggestions as card (card.card_id)}
+              {@const qty = deckQtyMap.get(card.card_id) ?? 0}
+              {@const max = maxAllowed(card.card_id)}
+              {@const maxed = qty >= max}
+              {@const banSt = banMap[card.card_id] ?? null}
+              <li>
+                <button
+                  class="card-thumb"
+                  class:maxed
+                  class:card-thumb--banned={banSt === 'forbidden'}
+                  title="{card.name} · played in {Math.round(card.frequency * 100)}% of {deckArchetype} decks{qty > 0 ? ` (×${qty} in deck)` : ''}"
+                  onclick={(e) => addTechCard(card)}
+                  onmouseenter={(e) => showPreview(card.card_id, e)}
+                  onmouseleave={hidePreview}
+                  aria-label="Add {card.name} to deck"
+                >
+                  <img
+                    src={card.image_url}
+                    alt={card.name}
+                    class="card-thumb-img"
+                    loading="lazy"
+                    onerror={handleImgError}
+                  />
+                  <span class="tech-freq-chip">{Math.round(card.frequency * 100)}%</span>
+                  {#if banSt}
+                    <span class="ban-strip ban-strip--{banSt}" aria-hidden="true"></span>
+                    <span class="ban-chip ban-chip--{banSt}">{banLabel(banSt)}</span>
+                  {/if}
+                  {#if qty > 0}
+                    <span class="qty-overlay" class:maxed>{qty}</span>
+                  {/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     {/if}
   </aside>
 
@@ -327,7 +871,9 @@
         <ul class="deck-list">
           {#each mainDeck as slot (slot.card_id)}
             {@const badge = cardBadge(slot.tcg_date, slot.ocg_date)}
-            <li class="deck-row">
+            {@const tcgSt = data.tcgBan[slot.card_id] ?? null}
+            {@const ocgSt = data.ocgBan[slot.card_id] ?? null}
+            <li class="deck-row" onmouseenter={(e) => showPreview(slot.card_id, e)} onmouseleave={hidePreview}>
               <div class="row-img-wrap">
                 <img src={slot.image_url} alt={slot.name} class="row-img" loading="lazy" onerror={handleImgError} />
               </div>
@@ -335,10 +881,16 @@
               {#if badge}
                 <span class="row-badge row-badge--{badge.toLowerCase()}">{badge}</span>
               {/if}
+              {#if tcgSt || ocgSt}
+                <div class="row-ban-badges">
+                  {#if tcgSt}<span class="row-ban row-ban--{tcgSt}">TCG {banLabel(tcgSt)}</span>{/if}
+                  {#if ocgSt}<span class="row-ban row-ban--{ocgSt}">OCG {banLabel(ocgSt)}</span>{/if}
+                </div>
+              {/if}
               <div class="row-controls">
                 <button class="qty-btn" onclick={() => changeQty(mainDeck, slot.card_id, -1)} aria-label="Decrease">−</button>
                 <span class="qty-val">×{slot.quantity}</span>
-                <button class="qty-btn" onclick={() => changeQty(mainDeck, slot.card_id, 1)} aria-label="Increase" disabled={slot.quantity >= 3}>+</button>
+                <button class="qty-btn" onclick={() => changeQty(mainDeck, slot.card_id, 1)} aria-label="Increase" disabled={slot.quantity >= 3 || (deckQtyMap.get(slot.card_id) ?? 0) >= maxAllowed(slot.card_id)}>+</button>
                 <button class="rm-btn" onclick={() => removeCard(mainDeck, slot.card_id)} aria-label="Remove">✕</button>
               </div>
             </li>
@@ -366,7 +918,9 @@
         <ul class="deck-list">
           {#each extraDeck as slot (slot.card_id)}
             {@const badge = cardBadge(slot.tcg_date, slot.ocg_date)}
-            <li class="deck-row">
+            {@const tcgSt = data.tcgBan[slot.card_id] ?? null}
+            {@const ocgSt = data.ocgBan[slot.card_id] ?? null}
+            <li class="deck-row" onmouseenter={(e) => showPreview(slot.card_id, e)} onmouseleave={hidePreview}>
               <div class="row-img-wrap">
                 <img src={slot.image_url} alt={slot.name} class="row-img" loading="lazy" onerror={handleImgError} />
               </div>
@@ -374,10 +928,16 @@
               {#if badge}
                 <span class="row-badge row-badge--{badge.toLowerCase()}">{badge}</span>
               {/if}
+              {#if tcgSt || ocgSt}
+                <div class="row-ban-badges">
+                  {#if tcgSt}<span class="row-ban row-ban--{tcgSt}">TCG {banLabel(tcgSt)}</span>{/if}
+                  {#if ocgSt}<span class="row-ban row-ban--{ocgSt}">OCG {banLabel(ocgSt)}</span>{/if}
+                </div>
+              {/if}
               <div class="row-controls">
                 <button class="qty-btn" onclick={() => changeQty(extraDeck, slot.card_id, -1)} aria-label="Decrease">−</button>
                 <span class="qty-val">×{slot.quantity}</span>
-                <button class="qty-btn" onclick={() => changeQty(extraDeck, slot.card_id, 1)} aria-label="Increase" disabled={slot.quantity >= 3}>+</button>
+                <button class="qty-btn" onclick={() => changeQty(extraDeck, slot.card_id, 1)} aria-label="Increase" disabled={slot.quantity >= 3 || (deckQtyMap.get(slot.card_id) ?? 0) >= maxAllowed(slot.card_id)}>+</button>
                 <button class="rm-btn" onclick={() => removeCard(extraDeck, slot.card_id)} aria-label="Remove">✕</button>
               </div>
             </li>
@@ -405,7 +965,9 @@
         <ul class="deck-list">
           {#each sideDeck as slot (slot.card_id)}
             {@const badge = cardBadge(slot.tcg_date, slot.ocg_date)}
-            <li class="deck-row">
+            {@const tcgSt = data.tcgBan[slot.card_id] ?? null}
+            {@const ocgSt = data.ocgBan[slot.card_id] ?? null}
+            <li class="deck-row" onmouseenter={(e) => showPreview(slot.card_id, e)} onmouseleave={hidePreview}>
               <div class="row-img-wrap">
                 <img src={slot.image_url} alt={slot.name} class="row-img" loading="lazy" onerror={handleImgError} />
               </div>
@@ -413,10 +975,16 @@
               {#if badge}
                 <span class="row-badge row-badge--{badge.toLowerCase()}">{badge}</span>
               {/if}
+              {#if tcgSt || ocgSt}
+                <div class="row-ban-badges">
+                  {#if tcgSt}<span class="row-ban row-ban--{tcgSt}">TCG {banLabel(tcgSt)}</span>{/if}
+                  {#if ocgSt}<span class="row-ban row-ban--{ocgSt}">OCG {banLabel(ocgSt)}</span>{/if}
+                </div>
+              {/if}
               <div class="row-controls">
                 <button class="qty-btn" onclick={() => changeQty(sideDeck, slot.card_id, -1)} aria-label="Decrease">−</button>
                 <span class="qty-val">×{slot.quantity}</span>
-                <button class="qty-btn" onclick={() => changeQty(sideDeck, slot.card_id, 1)} aria-label="Increase" disabled={slot.quantity >= 3}>+</button>
+                <button class="qty-btn" onclick={() => changeQty(sideDeck, slot.card_id, 1)} aria-label="Increase" disabled={slot.quantity >= 3 || (deckQtyMap.get(slot.card_id) ?? 0) >= maxAllowed(slot.card_id)}>+</button>
                 <button class="rm-btn" onclick={() => removeCard(sideDeck, slot.card_id)} aria-label="Remove">✕</button>
               </div>
             </li>
@@ -427,6 +995,8 @@
 
   </main>
 </div>
+
+<CardPreview cardId={previewCardId} anchorX={previewX} anchorY={previewY} />
 
 <style>
   /* ── Top bar ────────────────────────────────────────────────────────────── */
@@ -485,6 +1055,22 @@
     border-color: var(--gold);
   }
 
+  .draft-badge {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: #4ade80;
+    white-space: nowrap;
+    animation: draft-fade 2.5s ease-out forwards;
+  }
+
+  @keyframes draft-fade {
+    0%, 60% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+
   .topbar-right {
     display: flex;
     align-items: center;
@@ -505,6 +1091,14 @@
 
   .total-badge.has-cards {
     color: var(--text-secondary);
+  }
+
+  .budget-badge {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    color: var(--gold);
+    white-space: nowrap;
   }
 
   .save-btn {
@@ -592,6 +1186,99 @@
     border-color: var(--gold);
   }
 
+  .filter-select--full {
+    grid-column: 1 / -1;
+  }
+
+  .advanced-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-top: 0.5rem;
+    padding: 0.4rem 0.1rem;
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-family: inherit;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color var(--duration-fast) var(--ease-out);
+  }
+
+  .advanced-toggle:hover {
+    color: var(--text-secondary);
+  }
+
+  .advanced-chevron {
+    transition: transform var(--duration-fast) var(--ease-out);
+  }
+
+  .advanced-chevron--open {
+    transform: rotate(180deg);
+  }
+
+  .advanced-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+    padding: 0.625rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+  }
+
+  .range-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto 1fr;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .range-label {
+    font-size: 0.6875rem;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+
+  .range-sep {
+    color: var(--text-tertiary);
+    text-align: center;
+  }
+
+  .range-input {
+    width: 100%;
+    padding: 0.3rem 0.4rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.75rem;
+    outline: none;
+  }
+
+  .range-input:focus {
+    border-color: var(--gold);
+  }
+
+  .advanced-clear {
+    align-self: flex-start;
+    padding: 0.2rem 0;
+    background: none;
+    border: none;
+    color: var(--gold);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .advanced-clear:hover {
+    color: var(--gold-hover);
+  }
+
   .search-loading {
     display: flex;
     justify-content: center;
@@ -632,6 +1319,11 @@
       border-color var(--duration-fast) var(--ease-out),
       transform var(--duration-fast) var(--ease-out),
       opacity var(--duration-fast) var(--ease-out);
+  }
+
+  .card-thumb-skeleton {
+    aspect-ratio: 421 / 614;
+    border-radius: 4px;
   }
 
   .card-thumb:hover:not(.maxed) {
@@ -722,6 +1414,73 @@
   .qty-overlay.maxed {
     background: var(--text-tertiary);
     color: var(--bg-base);
+  }
+
+  .price-chip {
+    position: absolute;
+    bottom: 2px;
+    left: 2px;
+    padding: 0.05rem 0.28rem;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(2px);
+    border-radius: 3px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.5rem;
+    font-weight: 700;
+    color: var(--gold);
+    line-height: 1.6;
+    pointer-events: none;
+  }
+
+  /* ── Tech suggestions (T2.9) ───────────────────────────────────────────── */
+  .tech-section {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .tech-label {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 0.625rem;
+  }
+
+  .tech-archetype {
+    color: var(--gold);
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 600;
+  }
+
+  .tech-loading {
+    display: flex;
+    justify-content: center;
+    padding: 1rem;
+  }
+
+  .tech-empty {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+  }
+
+  .tech-freq-chip {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    padding: 0.05rem 0.28rem;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(2px);
+    border-radius: 3px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.5rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    pointer-events: none;
   }
 
   /* ── Deck panel ─────────────────────────────────────────────────────────── */
@@ -925,7 +1684,7 @@
     to { transform: rotate(360deg); }
   }
 
-  /* ── Mobile fallback ────────────────────────────────────────────────────── */
+  /* ── Mobile fallback (T3.6) ─────────────────────────────────────────────── */
   @media (max-width: 768px) {
     .builder-layout {
       grid-template-columns: 1fr;
@@ -936,6 +1695,275 @@
       height: auto;
       border-right: none;
       border-bottom: 1px solid var(--border-subtle);
+      padding: 1rem;
     }
+
+    .deck-panel {
+      padding: 1.25rem 1rem;
+    }
+
+    /* 2 columns instead of 4 — thumbnails stay tappable on narrow screens */
+    .card-grid-sm {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.5rem;
+    }
+
+    /* Topbar wraps to two rows instead of squeezing/overflowing horizontally */
+    .topbar {
+      flex-wrap: wrap;
+      padding: 0.625rem 1rem;
+      row-gap: 0.625rem;
+    }
+
+    .topbar-left {
+      flex: 1 1 100%;
+    }
+
+    .topbar-right {
+      flex: 1 1 100%;
+      flex-wrap: wrap;
+    }
+
+    .title-input {
+      max-width: none;
+    }
+
+    /* Larger touch targets for deck row controls (was 22px, below the ~44px guideline) */
+    .qty-btn,
+    .rm-btn {
+      width: 32px;
+      height: 32px;
+    }
+
+    .deck-row {
+      padding: 0.5rem 0;
+      gap: 0.5rem;
+    }
+  }
+
+  /* ── Validation strip ───────────────────────────────────────────────────── */
+  .draft-notice {
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+    padding: 0.5rem 1.5rem;
+    background: rgba(201, 164, 73, 0.08);
+    border-bottom: 1px solid rgba(201, 164, 73, 0.2);
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+  }
+
+  .draft-notice-discard {
+    background: none;
+    border: none;
+    color: var(--gold);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .draft-notice-discard:hover {
+    color: var(--gold-hover);
+  }
+
+  .draft-notice-dismiss {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .draft-notice-dismiss:hover {
+    color: var(--text-primary);
+  }
+
+  .validation-strip {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.375rem 1rem;
+    padding: 0.5rem 1.5rem;
+    background: rgba(8, 9, 13, 0.9);
+    border-bottom: 1px solid var(--border-subtle);
+    position: sticky;
+    top: 120px; /* nav (60px) + topbar (~60px) */
+    z-index: 40;
+    backdrop-filter: blur(8px);
+  }
+
+  .val-issue {
+    display: flex;
+    align-items: center;
+    gap: 0.3125rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .val-issue--error {
+    color: #f87171;
+  }
+
+  .val-issue--warn {
+    color: #fbbf24;
+  }
+
+  .val-icon {
+    font-size: 0.625rem;
+    font-weight: 800;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .val-issue--error .val-icon {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+  }
+
+  .val-issue--warn .val-icon {
+    background: rgba(251, 191, 36, 0.15);
+    color: #fbbf24;
+  }
+
+  /* ── Banlist format toggle (topbar) ─────────────────────────────────────── */
+  .ban-format-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 0.1875rem 0.375rem 0.1875rem 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .ban-format-label {
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+    margin-right: 0.125rem;
+  }
+
+  .ban-fmt-btn {
+    padding: 0.125rem 0.4375rem;
+    border-radius: 3px;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease-out),
+      color var(--duration-fast) var(--ease-out);
+  }
+
+  .ban-fmt-btn:hover {
+    color: var(--text-primary);
+  }
+
+  .ban-fmt-btn.active {
+    background: var(--bg-elevated);
+    color: var(--gold);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+
+  /* Blocked message */
+  .blocked-msg {
+    font-size: 0.75rem;
+    color: #f87171;
+    white-space: nowrap;
+    animation: fadeIn 0.15s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Banlist badges on search thumbnails ─────────────────────────────────── */
+  .ban-strip {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    pointer-events: none;
+  }
+
+  .ban-strip--forbidden    { background: rgba(239, 68, 68, 0.95); }
+  .ban-strip--limited      { background: rgba(249, 115, 22, 0.95); }
+  .ban-strip--semi_limited { background: rgba(234, 179, 8, 0.95); }
+
+  /* Small chip label at top-right of thumbnail */
+  .ban-chip {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    padding: 0 0.25rem;
+    border-radius: 3px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.5rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    line-height: 1.6;
+    pointer-events: none;
+  }
+
+  .ban-chip--forbidden    { background: rgba(239, 68, 68, 0.88); color: #fff; }
+  .ban-chip--limited      { background: rgba(249, 115, 22, 0.88); color: #fff; }
+  .ban-chip--semi_limited { background: rgba(234, 179, 8, 0.88); color: #0a0800; }
+
+  /* Forbidden cards get a dim overlay */
+  .card-thumb--banned {
+    filter: grayscale(0.4);
+  }
+
+  /* ── Banlist badges on deck rows ─────────────────────────────────────────── */
+  .row-ban-badges {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+  }
+
+  .row-ban {
+    padding: 0.0625rem 0.3125rem;
+    border-radius: 3px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.5rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    line-height: 1.7;
+    white-space: nowrap;
+  }
+
+  .row-ban--forbidden {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+
+  .row-ban--limited {
+    background: rgba(249, 115, 22, 0.15);
+    color: #fb923c;
+    border: 1px solid rgba(249, 115, 22, 0.3);
+  }
+
+  .row-ban--semi_limited {
+    background: rgba(234, 179, 8, 0.12);
+    color: #facc15;
+    border: 1px solid rgba(234, 179, 8, 0.25);
   }
 </style>

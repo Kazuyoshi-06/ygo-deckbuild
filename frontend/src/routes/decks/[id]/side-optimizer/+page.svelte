@@ -47,9 +47,10 @@
     frame_type: string;
     image_url: string;
     quantity: number;
+    role: string | null;
     global_side_pct: number;
-    weighted_score: number;           // Σ(side_pct_in_arch × meta_weight)
-    archetype_coverage: Record<string, number>; // arch → side_pct
+    weighted_score: number;
+    archetype_coverage: Record<string, number>;
     in_current_side: boolean;
   }
 
@@ -58,7 +59,7 @@
 
   // ── Meta configuration ──────────────────────────────────────────────
   let metaEntries = $state<MetaEntry[]>(
-    d.archetypes.slice(0, 4).map((a) => ({ archetype: a.archetype_label, pct: 25 }))
+    d.archetypes.slice(0, 4).map((a: ArchetypeSideData) => ({ archetype: a.archetype_label, pct: 25 }))
   );
   let newArch = $state('');
 
@@ -81,12 +82,12 @@
   function setQuickMeta() {
     const top = d.archetypes.slice(0, 3);
     const base = Math.floor(100 / Math.max(top.length, 1));
-    metaEntries = top.map((a) => ({ archetype: a.archetype_label, pct: base }));
+    metaEntries = top.map((a: ArchetypeSideData) => ({ archetype: a.archetype_label, pct: base }));
   }
 
   // ── Archetype lookup ────────────────────────────────────────────────
   const archLookup = $derived(
-    Object.fromEntries(d.archetypes.map((a) => [a.archetype_label, a]))
+    Object.fromEntries(d.archetypes.map((a: ArchetypeSideData) => [a.archetype_label, a]))
   );
 
   // ── Score computation ───────────────────────────────────────────────
@@ -97,7 +98,7 @@
     for (const entry of metaEntries) {
       const arch = archLookup[entry.archetype];
       if (!arch) continue;
-      const cardData = arch.top_side_cards.find((c) => c.card_id === cardId);
+      const cardData = arch.top_side_cards.find((c: ArchetypeSideCard) => c.card_id === cardId);
       const pct = cardData ? cardData.side_pct : 0;
       byArch[entry.archetype] = pct;
       weighted += pct * (entry.pct / 100);
@@ -106,17 +107,17 @@
   }
 
   const scoredCurrentSide = $derived<ScoredCard[]>(
-    d.current_side.map((c) => {
+    d.current_side.map((c: SideCardInfo) => {
       const { weighted, byArch } = computeScore(c.card_id);
       return { ...c, weighted_score: weighted, archetype_coverage: byArch, in_current_side: true };
-    }).sort((a, b) => b.weighted_score - a.weighted_score)
+    }).sort((a: ScoredCard, b: ScoredCard) => b.weighted_score - a.weighted_score)
   );
 
   const scoredSuggestions = $derived<ScoredCard[]>(
-    d.suggestions.map((c) => {
+    d.suggestions.map((c: SideCardInfo) => {
       const { weighted, byArch } = computeScore(c.card_id);
       return { ...c, weighted_score: weighted, archetype_coverage: byArch, in_current_side: false };
-    }).sort((a, b) => b.weighted_score - a.weighted_score).slice(0, 15)
+    }).sort((a: ScoredCard, b: ScoredCard) => b.weighted_score - a.weighted_score).slice(0, 15)
   );
 
   const coverageScore = $derived(

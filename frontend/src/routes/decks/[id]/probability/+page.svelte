@@ -120,6 +120,33 @@
     return 'ℹ';
   }
 
+  // Starter group for interpretation
+  let starterGroup = $derived(prob.groups.find((g: GroupStats) => g.role === 'starter') ?? null);
+
+  // Textual interpretations
+  function deadHandInterpret(v: number): string {
+    const p = (v * 100).toFixed(1) + '%';
+    if (v <= 0.05) return `Excellent — you brick in only ${p} of games. Well below the 8% competitive target.`;
+    if (v <= 0.10) return `Good — ${p} brick rate. Within the competitive target (≤8%).`;
+    if (v <= 0.18) return `Moderate — ${p} brick rate. Slightly above the 8% competitive target. Consider adding 1–2 more starters.`;
+    return `High — ${p} brick rate. Significantly above the 8% target. Your deck will struggle to open consistently.`;
+  }
+
+  function starterInterpret(p5: number, p6: number): string {
+    const s5 = (p5 * 100).toFixed(1) + '%';
+    const s6 = (p6 * 100).toFixed(1) + '%';
+    if (p5 >= 0.85) return `You open at least 1 starter in ${s5} of Going First hands (${s6} Going Second). Excellent — well above the 70% competitive benchmark.`;
+    if (p5 >= 0.75) return `You open at least 1 starter in ${s5} of Going First hands (${s6} Going Second). Good — above the competitive target of 70%.`;
+    if (p5 >= 0.65) return `You open at least 1 starter in ${s5} of Going First hands (${s6} Going Second). Below the 70% competitive target. Consider adding 1–2 more starters.`;
+    return `You open at least 1 starter in only ${s5} of Going First hands (${s6} Going Second). Well below the 70% target. Your deck will struggle to set up consistently.`;
+  }
+
+  function starterColor(p5: number): string {
+    if (p5 >= 0.75) return '#22c55e';
+    if (p5 >= 0.65) return '#f59e0b';
+    return '#ef4444';
+  }
+
   // Sort cards: first by role bucket, then untagged at end
   let sortedCards = $derived(
     [...prob.cards].sort((a, b) => {
@@ -136,7 +163,7 @@
   <div class="topbar">
     <a href="/decks/{data.deckId}" class="back">← Deck</a>
     <h1>{prob.deck_title}</h1>
-    <span class="badge">{prob.main_count} cartes main</span>
+    <span class="badge">{prob.main_count} main deck cards</span>
   </div>
 
   <!-- ── Recommendations ─────────────────────────────────────── -->
@@ -155,35 +182,47 @@
   {#if prob.has_roles}
     <section class="stats-grid">
       <div class="stat-card dead-hand">
-        <h2>Main morte</h2>
-        <p class="stat-sub">P(0 starter · 0 handtrap)</p>
+        <h2>Dead Hand Rate</h2>
+        <p class="stat-sub">P(0 starter &amp; 0 handtrap in opening hand)</p>
         <div class="dead-bars">
           <div class="dead-row">
-            <span class="hand-label">Main 5 cartes</span>
+            <span class="hand-label">Going First — 5</span>
             <div class="bar-track">
               <div class="bar-fill" style="width:{prob.dead_hand_p5 * 100}%;background:{deadHandColor(prob.dead_hand_p5)}"></div>
             </div>
             <span class="hand-pct" style="color:{deadHandColor(prob.dead_hand_p5)}">{pct(prob.dead_hand_p5)}</span>
           </div>
           <div class="dead-row">
-            <span class="hand-label">Main 6 cartes</span>
+            <span class="hand-label">Going Second — 6</span>
             <div class="bar-track">
               <div class="bar-fill" style="width:{prob.dead_hand_p6 * 100}%;background:{deadHandColor(prob.dead_hand_p6)}"></div>
             </div>
             <span class="hand-pct" style="color:{deadHandColor(prob.dead_hand_p6)}">{pct(prob.dead_hand_p6)}</span>
           </div>
         </div>
+        <div class="dead-interpret">
+          <p class="interpret-line" style="color:{deadHandColor(prob.dead_hand_p5)}88">
+            <span class="interpret-tag">GF</span>
+            {deadHandInterpret(prob.dead_hand_p5)}
+          </p>
+          {#if prob.dead_hand_p5 !== prob.dead_hand_p6}
+            <p class="interpret-line" style="color:{deadHandColor(prob.dead_hand_p6)}88">
+              <span class="interpret-tag">GS</span>
+              {deadHandInterpret(prob.dead_hand_p6)}
+            </p>
+          {/if}
+        </div>
       </div>
 
       <div class="stat-card groups">
-        <h2>Par rôle</h2>
+        <h2>By Role</h2>
         <table>
           <thead>
             <tr>
-              <th>Rôle</th>
+              <th>Role</th>
               <th>Copies</th>
-              <th title="P(≥1) en main de 5">P≥1 (5)</th>
-              <th title="P(≥1) en main de 6">P≥1 (6)</th>
+              <th title="P(≥1) in a 5-card hand">P≥1 (GF)</th>
+              <th title="P(≥1) in a 6-card hand">P≥1 (GS)</th>
             </tr>
           </thead>
           <tbody>
@@ -202,10 +241,16 @@
               </tr>
             {/each}
             {#if prob.groups.length === 0}
-              <tr><td colspan="4" class="empty">Aucun rôle assigné</td></tr>
+              <tr><td colspan="4" class="empty">No roles assigned yet</td></tr>
             {/if}
           </tbody>
         </table>
+        {#if starterGroup}
+          <div class="starter-interpret" style="border-left-color:{starterColor(starterGroup.p_at_least_one_5)}">
+            <span class="interpret-icon" style="color:{starterColor(starterGroup.p_at_least_one_5)}">◈</span>
+            <p>{starterInterpret(starterGroup.p_at_least_one_5, starterGroup.p_at_least_one_6)}</p>
+          </div>
+        {/if}
       </div>
     </section>
   {/if}
@@ -213,7 +258,7 @@
   <!-- ── Card tagger ─────────────────────────────────────────── -->
   <section class="tagger">
     <div class="tagger-header">
-      <h2>Cartes main deck</h2>
+      <h2>Main Deck Cards</h2>
       <div class="legend">
         {#each ROLES as r}
           <span class="leg-chip" style="background:{r.color}22;color:{r.color};border-color:{r.color}44">{r.label} = {r.desc}</span>
@@ -367,7 +412,7 @@
 
   .dead-bars { display: flex; flex-direction: column; gap: 0.75rem; }
   .dead-row { display: flex; align-items: center; gap: 0.75rem; }
-  .hand-label { font-size: 0.8rem; color: #94a3b8; width: 110px; flex-shrink: 0; }
+  .hand-label { font-size: 0.8rem; color: #94a3b8; width: 130px; flex-shrink: 0; }
   .bar-track {
     flex: 1;
     height: 8px;
@@ -377,6 +422,53 @@
   }
   .bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
   .hand-pct { font-size: 0.8rem; font-weight: 600; width: 44px; text-align: right; flex-shrink: 0; }
+
+  /* Dead hand interpretation block */
+  .dead-interpret {
+    margin-top: 0.875rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #1e293b;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .interpret-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    line-height: 1.55;
+    margin: 0;
+  }
+  .interpret-tag {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 0.6rem;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+    background: #1e293b;
+    border-radius: 3px;
+    padding: 0.1rem 0.3rem;
+    flex-shrink: 0;
+    margin-top: 0.1rem;
+    color: #64748b;
+  }
+
+  /* Starter group interpretation */
+  .starter-interpret {
+    margin-top: 0.875rem;
+    padding: 0.625rem 0.875rem;
+    border-left: 3px solid;
+    background: #0a0f1a;
+    border-radius: 0 6px 6px 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.775rem;
+    color: #94a3b8;
+    line-height: 1.55;
+  }
+  .starter-interpret p { margin: 0; }
+  .interpret-icon { font-size: 0.875rem; flex-shrink: 0; margin-top: 0.05rem; }
 
   .groups table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   .groups th {
